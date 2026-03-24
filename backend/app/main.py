@@ -10,7 +10,6 @@ app = FastAPI(
     redoc_url=f"{settings.api_v1_str}/redoc",
 )
 
-# Set up CORS for the frontend (Next.js typically runs on localhost:3000)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["http://localhost:3000"], 
