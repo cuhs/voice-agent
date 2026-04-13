@@ -14,7 +14,7 @@ export default function Home() {
   const wsRef = useRef<WebSocket | null>(null);
 
   const connectWebSocket = () => {
-    const ws = new WebSocket("ws://127.0.0.1:8000/ws/audio");
+    const ws = new WebSocket("ws://127.0.0.1:8000/api/v1/ws/audio");
     ws.binaryType = "arraybuffer";
     wsRef.current = ws;
 
