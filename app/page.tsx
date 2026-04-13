@@ -5,57 +5,84 @@ import { useState, useRef } from "react";
 export default function Home() {
   const [isRecording, setIsRecording] = useState(false);
   const [status, setStatus] = useState("idle");
-  const [isReceiving, setIsReceiving] = useState(false);
-  const [hasPlayback, setHasPlayback] = useState(false);
+  const [wsStatus, setWsStatus] = useState("disconnected");
 
   // References for our AudioWorklet flow
   const streamRef = useRef<MediaStream | null>(null);
   const audioContextRef = useRef<AudioContext | null>(null);
   const workletNodeRef = useRef<AudioWorkletNode | null>(null);
+  const wsRef = useRef<WebSocket | null>(null);
 
-  // Accumulate the raw Float32Array chunks so we can test playback
-  const recordedChunksRef = useRef<Float32Array[]>([]);
+  const connectWebSocket = () => {
+    const ws = new WebSocket("ws://127.0.0.1:8000/ws/audio");
+    ws.binaryType = "arraybuffer";
+    wsRef.current = ws;
+
+    ws.onopen = () => {
+      setWsStatus("connected");
+    };
+
+    ws.onmessage = (event) => {
+      // Receive the echoed ArrayBuffer containing Int16 PCM data
+      const int16 = new Int16Array(event.data);
+
+      // Decode Int16 PCM bytes back to Float32Array
+      const float32 = new Float32Array(int16.length);
+      for (let i = 0; i < int16.length; i++) {
+        float32[i] = int16[i] / 32768.0;
+      }
+
+      console.log("Echoed audio chunk received. Float32Array length:", float32.length);
+    };
+
+    ws.onclose = () => {
+      setWsStatus("disconnected");
+    };
+
+    ws.onerror = (err) => {
+      console.error("WebSocket error:", err);
+      setWsStatus("error: check console");
+    };
+  };
 
   const startRecording = async () => {
     try {
+      setWsStatus("connecting...");
+      connectWebSocket();
+
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
       streamRef.current = stream;
 
-      // Clear previous recording 
-      recordedChunksRef.current = [];
-      setHasPlayback(false);
-
-      // 1. Create AudioContext with 16kHz sample rate
-      // as required by Deepgram/Silero VAD
       const audioContext = new (window.AudioContext || (window as any).webkitAudioContext)({
         sampleRate: 16000,
       });
       audioContextRef.current = audioContext;
 
-      // 2. Load the AudioWorklet processor script
-      // It must be in public/ so Next.js doesn't bundle it
       await audioContext.audioWorklet.addModule("/audio-processor.js");
 
-      // 3. Connect the media stream to the worklet node
       const source = audioContext.createMediaStreamSource(stream);
       const workletNode = new AudioWorkletNode(audioContext, "audio-processor");
       workletNodeRef.current = workletNode;
 
-      // 4. Handle incoming raw PCM Float32Array chunks
+      // When the AudioWorklet posts a message with Float32Array (128 samples typically)
       workletNode.port.onmessage = (event) => {
-        // Here we receive 128-sample Float32Arrays (~2.7ms of audio at 48kHz, or ~8ms at 16kHz)
-        setIsReceiving(true);
+        const float32Data = event.data as Float32Array;
 
-        // Save the chunk to verify it later
-        // We clone it because transferring Float32Arrays from workers can sometimes reuse memory
-        recordedChunksRef.current.push(new Float32Array(event.data));
+        // Convert Float32Array to Int16Array (16-bit PCM buffer) for transport
+        const int16Data = new Int16Array(float32Data.length);
+        for (let i = 0; i < float32Data.length; i++) {
+          // Clamp the values to -1 to 1 before converting to 16 bit PCM
+          const s = Math.max(-1, Math.min(1, float32Data[i]));
+          int16Data[i] = s < 0 ? s * 0x8000 : s * 0x7FFF;
+        }
 
-        // Removed console log so we don't spam the console too much during long recordings
+        // Send binary buffer to backend
+        if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+          wsRef.current.send(int16Data.buffer);
+        }
       };
 
       source.connect(workletNode);
-      // Note: we do NOT connect workletNode to audioContext.destination
-      // to avoid causing an echo feedback loop!
 
       setIsRecording(true);
       setStatus("listening via AudioWorklet (16kHz)");
@@ -81,50 +108,13 @@ export default function Home() {
       streamRef.current = null;
     }
 
+    if (wsRef.current) {
+      wsRef.current.close();
+      wsRef.current = null;
+    }
+
     setIsRecording(false);
     setStatus("stopped");
-    setIsReceiving(false);
-
-    // If we captured anything, enable the playback button
-    if (recordedChunksRef.current.length > 0) {
-      setHasPlayback(true);
-    }
-  };
-
-  const playCapture = () => {
-    if (recordedChunksRef.current.length === 0) return;
-
-    // 1. Calculate the total size of all chunks
-    const totalLength = recordedChunksRef.current.reduce((acc, chunk) => acc + chunk.length, 0);
-
-    // 2. Combine all chunks into one massive Float32Array
-    const mergedArray = new Float32Array(totalLength);
-    let offset = 0;
-    for (const chunk of recordedChunksRef.current) {
-      mergedArray.set(chunk, offset);
-      offset += chunk.length;
-    }
-
-    // 3. Play it back using a temporary AudioContext
-    const playbackCtx = new (window.AudioContext || (window as any).webkitAudioContext)({
-      sampleRate: 16000,
-    });
-
-    // Create an empty AudioBuffer at 16kHz
-    const audioBuffer = playbackCtx.createBuffer(1, totalLength, 16000);
-    // Fill the buffer's first (and only) channel with our raw audio data
-    audioBuffer.getChannelData(0).set(mergedArray);
-
-    // Connect and play
-    const sourceNode = playbackCtx.createBufferSource();
-    sourceNode.buffer = audioBuffer;
-    sourceNode.connect(playbackCtx.destination);
-    sourceNode.start();
-
-    setStatus("playing back captured audio...");
-    sourceNode.onended = () => {
-      setStatus("stopped");
-    };
   };
 
   const handleToggle = () => {
@@ -138,22 +128,14 @@ export default function Home() {
   return (
     <div style={{ padding: "2rem", fontFamily: "sans-serif" }}>
       <h1>Voice Agent</h1>
-      <p>Status: <strong>{status}</strong></p>
-
-      {isReceiving && <p style={{ color: "green", fontWeight: "bold" }}>Receiving audio chunks...</p>}
+      <p>Mic Status: <strong>{status}</strong></p>
+      <p>WebSocket: <strong>{wsStatus}</strong></p>
 
       <div style={{ display: "flex", gap: "10px", marginBottom: "1rem" }}>
         <button onClick={handleToggle}>
           {isRecording ? "Stop" : "Start"}
         </button>
-
-        {hasPlayback && !isRecording && (
-          <button onClick={playCapture} disabled={isRecording}>
-            Verify Playback
-          </button>
-        )}
       </div>
-
     </div>
   );
 }
