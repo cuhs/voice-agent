@@ -1,4 +1,4 @@
-from fastapi import FastAPI
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from app.api.router import api_router_v1
 from app.core.config import settings
@@ -23,3 +23,16 @@ app.include_router(api_router_v1, prefix=settings.api_v1_str)
 @app.get("/")
 async def root():
     return {"message": f"Welcome to {settings.project_name}"}
+
+@app.websocket("/ws/audio")
+async def websocket_audio_endpoint(websocket: WebSocket):
+    await websocket.accept()
+    print("WebSocket client connected to /ws/audio")
+    try:
+        while True:
+             # Wait for data from the client
+            data = await websocket.receive_bytes()
+            # Echo the exact same data back
+            await websocket.send_bytes(data)
+    except WebSocketDisconnect:
+        print("WebSocket client disconnected")
