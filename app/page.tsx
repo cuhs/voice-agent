@@ -7,7 +7,9 @@ export default function Home() {
   const [status, setStatus] = useState("idle");
   const [wsStatus, setWsStatus] = useState("disconnected");
 
-  // References for our AudioWorklet flow
+  const [finalTranscript, setFinalTranscript] = useState("");
+  const [interimTranscript, setInterimTranscript] = useState("");
+
   const streamRef = useRef<MediaStream | null>(null);
   const audioContextRef = useRef<AudioContext | null>(null);
   const workletNodeRef = useRef<AudioWorkletNode | null>(null);
@@ -15,7 +17,6 @@ export default function Home() {
 
   const connectWebSocket = () => {
     const ws = new WebSocket("ws://127.0.0.1:8000/api/v1/ws/audio");
-    ws.binaryType = "arraybuffer";
     wsRef.current = ws;
 
     ws.onopen = () => {
@@ -23,16 +24,22 @@ export default function Home() {
     };
 
     ws.onmessage = (event) => {
-      // Receive the echoed ArrayBuffer containing Int16 PCM data
-      const int16 = new Int16Array(event.data);
-
-      // Decode Int16 PCM bytes back to Float32Array
-      const float32 = new Float32Array(int16.length);
-      for (let i = 0; i < int16.length; i++) {
-        float32[i] = int16[i] / 32768.0;
+      if (typeof event.data === 'string') {
+        try {
+          const msg = JSON.parse(event.data);
+          
+          if (msg.type === "transcript") {
+            if (msg.is_final) {
+              setFinalTranscript(prev => prev + (prev ? " " : "") + msg.text);
+              setInterimTranscript("");
+            } else {
+              setInterimTranscript(msg.text);
+            }
+          }
+        } catch (e) {
+          console.error("Failed to parse websocket message", e);
+        }
       }
-
-      console.log("Echoed audio chunk received. Float32Array length:", float32.length);
     };
 
     ws.onclose = () => {
@@ -48,6 +55,8 @@ export default function Home() {
   const startRecording = async () => {
     try {
       setWsStatus("connecting...");
+      setFinalTranscript("");
+      setInterimTranscript("");
       connectWebSocket();
 
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
@@ -64,19 +73,16 @@ export default function Home() {
       const workletNode = new AudioWorkletNode(audioContext, "audio-processor");
       workletNodeRef.current = workletNode;
 
-      // When the AudioWorklet posts a message with Float32Array (128 samples typically)
       workletNode.port.onmessage = (event) => {
         const float32Data = event.data as Float32Array;
-
-        // Convert Float32Array to Int16Array (16-bit PCM buffer) for transport
+        
+        // Downsample and convert to 16-bit PCM buffer
         const int16Data = new Int16Array(float32Data.length);
         for (let i = 0; i < float32Data.length; i++) {
-          // Clamp the values to -1 to 1 before converting to 16 bit PCM
           const s = Math.max(-1, Math.min(1, float32Data[i]));
           int16Data[i] = s < 0 ? s * 0x8000 : s * 0x7FFF;
         }
 
-        // Send binary buffer to backend
         if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
           wsRef.current.send(int16Data.buffer);
         }
@@ -127,14 +133,25 @@ export default function Home() {
 
   return (
     <div style={{ padding: "2rem", fontFamily: "sans-serif" }}>
-      <h1>Voice Agent</h1>
-      <p>Mic Status: <strong>{status}</strong></p>
-      <p>WebSocket: <strong>{wsStatus}</strong></p>
+      <h1>Vocale AI</h1>
+      
+      <div>
+        <p>Mic Status: {status}</p>
+        <p>WebSocket: {wsStatus}</p>
 
-      <div style={{ display: "flex", gap: "10px", marginBottom: "1rem" }}>
         <button onClick={handleToggle}>
-          {isRecording ? "Stop" : "Start"}
+          {isRecording ? "Stop Recording" : "Start Recording"}
         </button>
+      </div>
+
+      <div style={{ marginTop: "2rem" }}>
+        <h3>Live Transcript</h3>
+        <p>
+          <span>{finalTranscript}</span>
+          <span style={{ color: "gray", fontStyle: "italic", marginLeft: finalTranscript && interimTranscript ? "0.3rem" : "0" }}>
+            {interimTranscript}
+          </span>
+        </p>
       </div>
     </div>
   );
