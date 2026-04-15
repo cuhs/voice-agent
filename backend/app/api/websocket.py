@@ -96,6 +96,55 @@ async def websocket_audio_endpoint(websocket: WebSocket):
                                 # Spawn async LLM process so we don't block STT parsing
                                 async def process_llm():
                                     try:
+                                        # --- ElevenLabs TTS Setup ---
+                                        tts_socket = None
+                                        tts_receive_task = None
+                                        api_key = getattr(settings, "elevenlabs_api_key", None)
+                                        print(f"ElevenLabs Key Present: {bool(api_key)}")
+                                        
+                                        if api_key:
+                                            try:
+                                                voice_id = "pNInz6obpgDQGcFmaJgB" 
+                                                elevenlabs_url = f"wss://api.elevenlabs.io/v1/text-to-speech/{voice_id}/stream-input?model_id=eleven_flash_v2_5&output_format=pcm_16000"
+                                                
+                                                tts_socket = await websockets.connect(elevenlabs_url)
+                                                print("Connected to ElevenLabs TTS!")
+                                                
+                                                init_msg = {
+                                                    "text": " ",
+                                                    "voice_settings": {"stability": 0.5, "similarity_boost": 0.8},
+                                                    "xi_api_key": api_key,
+                                                    "chunk_length_schedule": [50]
+                                                }
+                                                await tts_socket.send(json.dumps(init_msg))
+
+                                                async def receive_audio():
+                                                    try:
+                                                        while True:
+                                                            msg = await tts_socket.recv()
+                                                            data = json.loads(msg)
+                                                            keys = list(data.keys())
+                                                            
+                                                            if "error" in data:
+                                                                print(f"ElevenLabs API Error: {data['error']}")
+                                                            if data.get("audio"):
+                                                                print(".", end="", flush=True)
+                                                                import base64
+                                                                audio_bytes = base64.b64decode(data["audio"])
+                                                                await websocket.send_bytes(audio_bytes)
+                                                            if data.get("isFinal"):
+                                                                print("\nElevenLabs reports isFinal: True")
+                                                                break
+                                                    except websockets.exceptions.ConnectionClosed as e:
+                                                        print(f"\nElevenLabs websocket closed. Code: {e.code}, Reason: {e.reason}")
+                                                    except Exception as e:
+                                                        print(f"\nTTS Receive error: {e}")
+
+                                                tts_receive_task = asyncio.create_task(receive_audio())
+                                            except Exception as e:
+                                                print(f"Failed to connect to ElevenLabs: {e}")
+                                            
+                                        # --- LLM Stream ---
                                         print("\nBot: ", end="")
                                         stream = await llm_client.chat.completions.create(
                                             model="llama-3.1-8b-instant",
@@ -103,15 +152,50 @@ async def websocket_audio_endpoint(websocket: WebSocket):
                                             stream=True
                                         )
                                         full_response = ""
+                                        is_action_determined = False
+                                        is_action = False
+                                        
                                         async for chunk in stream:
-                                            # Validate the content packet safely
                                             content = chunk.choices[0].delta.content if chunk.choices else None
                                             if content:
                                                 print(content, end="", flush=True)
                                                 full_response += content
+                                                
+                                                if tts_socket:
+                                                    if not is_action_determined:
+                                                        action_keywords = ["LOOKUP_PATIENT:", "GET_APPOINTMENTS:", "GET_PRESCRIPTIONS:", "GET_LABS:", "GET_AVAILABLE_SLOTS:"]
+                                                        match_possible = False
+                                                        for kw in action_keywords:
+                                                            if kw.startswith(full_response) or full_response.startswith(kw):
+                                                                match_possible = True
+                                                                break
+                                                        
+                                                        if not match_possible:
+                                                            is_action_determined = True
+                                                            is_action = False
+                                                            await tts_socket.send(json.dumps({"text": full_response, "try_trigger_generation": True}))
+                                                    else:
+                                                        if not is_action:
+                                                            await tts_socket.send(json.dumps({"text": content, "try_trigger_generation": True}))
+
                                         print("\n")
                                         messages.append({"role": "assistant", "content": full_response})
                                         
+                                        if tts_socket:
+                                            # Determine if it ended up being an action
+                                            action_keywords = ["LOOKUP_PATIENT:", "GET_APPOINTMENTS:", "GET_PRESCRIPTIONS:", "GET_LABS:", "GET_AVAILABLE_SLOTS:"]
+                                            if any(full_response.startswith(kw) for kw in action_keywords):
+                                                is_action = True
+                                            
+                                            # Close the stream
+                                            if not is_action:
+                                                await tts_socket.send(json.dumps({"text": ""}))
+                                                try:
+                                                    await asyncio.wait_for(tts_receive_task, timeout=5.0)
+                                                except asyncio.TimeoutError:
+                                                    pass
+                                            await tts_socket.close()
+
                                         # ---- ACTION INTERCEPTION (Pseudo Tool Calling) ----
                                         from app.api.endpoints import (
                                             internal_lookup_patient, MOCK_APPOINTMENTS, 

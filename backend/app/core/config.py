@@ -5,6 +5,7 @@ class Settings(BaseSettings):
     api_v1_str: str = "/api/v1"
     deepgram_api_key: str | None = None
     groq_api_key: str | None = None
+    elevenlabs_api_key: str | None = None
 
     class Config:
         env_file = ".env"
