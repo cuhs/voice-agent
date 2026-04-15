@@ -125,38 +125,38 @@ async def websocket_audio_endpoint(websocket: WebSocket):
                                                 parts = resp_text.split("LOOKUP_PATIENT:")[1].strip().split(",")
                                                 if len(parts) >= 2:
                                                     p = internal_lookup_patient(parts[0].strip(), parts[1].strip())
-                                                    res_text = f"SYSTEM RESULT: {json.dumps(p) if p else 'Patient Not Found Database Mismatch.'}"
+                                                    res_text = f"[INTERNAL DATABASE RESPONSE (Do not read this text verbatim. Speak this naturally to the user)]: {json.dumps(p) if p else 'Patient Not Found.'}"
                                                     print(f"[ACTION FIRED]: {res_text}")
-                                                    messages.append({"role": "system", "content": res_text})
+                                                    messages.append({"role": "user", "content": res_text})
                                                     await process_llm() # Automatically follow-up!
                                             except Exception as e:
                                                 pass
                                                 
                                         elif resp_text.startswith("GET_APPOINTMENTS:"):
                                             pid = resp_text.split("GET_APPOINTMENTS:")[1].strip()
-                                            res_text = f"SYSTEM RESULT: {json.dumps(MOCK_APPOINTMENTS.get(pid, [str('No appointments found for ID ' + pid)]))}"
+                                            res_text = f"[INTERNAL DATABASE RESPONSE (Do not read this text verbatim. Speak this naturally to the user)]: {json.dumps(MOCK_APPOINTMENTS.get(pid, [str('No appointments found.')]))}"
                                             print(f"[ACTION FIRED]: {res_text}")
-                                            messages.append({"role": "system", "content": res_text})
+                                            messages.append({"role": "user", "content": res_text})
                                             await process_llm()
                                             
                                         elif resp_text.startswith("GET_PRESCRIPTIONS:"):
                                             pid = resp_text.split("GET_PRESCRIPTIONS:")[1].strip()
-                                            res_text = f"SYSTEM RESULT: {json.dumps(MOCK_PRESCRIPTIONS.get(pid, [str('No prescriptions found for ID ' + pid)]))}"
+                                            res_text = f"[INTERNAL DATABASE RESPONSE (Do not read this text verbatim. Speak this naturally to the user)]: {json.dumps(MOCK_PRESCRIPTIONS.get(pid, [str('No prescriptions found.')]))}"
                                             print(f"[ACTION FIRED]: {res_text}")
-                                            messages.append({"role": "system", "content": res_text})
+                                            messages.append({"role": "user", "content": res_text})
                                             await process_llm()
                                             
                                         elif resp_text.startswith("GET_LABS:"):
                                             pid = resp_text.split("GET_LABS:")[1].strip()
-                                            res_text = f"SYSTEM RESULT: {json.dumps(MOCK_LABS.get(pid, [str('No labs found for ID ' + pid)]))}"
+                                            res_text = f"[INTERNAL DATABASE RESPONSE (Do not read this text verbatim. Speak this naturally to the user)]: {json.dumps(MOCK_LABS.get(pid, [str('No labs found.')]))}"
                                             print(f"[ACTION FIRED]: {res_text}")
-                                            messages.append({"role": "system", "content": res_text})
+                                            messages.append({"role": "user", "content": res_text})
                                             await process_llm()
                                             
                                         elif resp_text.startswith("GET_AVAILABLE_SLOTS:"):
-                                            res_text = f"SYSTEM RESULT: {json.dumps(MOCK_AVAILABLE_SLOTS)}"
+                                            res_text = f"[INTERNAL DATABASE RESPONSE (Do not read this text verbatim. Speak this naturally to the user)]: {json.dumps(MOCK_AVAILABLE_SLOTS)}"
                                             print(f"[ACTION FIRED]: {res_text}")
-                                            messages.append({"role": "system", "content": res_text})
+                                            messages.append({"role": "user", "content": res_text})
                                             await process_llm()
 
                                     except Exception as e:
