@@ -48,15 +48,15 @@ async def websocket_audio_endpoint(websocket: WebSocket):
         "3. Do not use markdown formatting. "
         "4. Always verify the patient's identity before sharing medical details (ask for name and date of birth format YYYY-MM-DD). "
         "5. Never provide medical diagnoses or treatment advice — always direct clinical questions to a provider.\n"
-        "6. You are a patient coordination assistant, not a medical professional. If a patient describes symptoms or asks for medical advice, respond with empathy but direct them to contact their provider or call 911 if it's an emergency.\n"
-        "7. If the user says something or asks something completely unrelated to medical assistance, simply say that you are unable to assist. if it is medical related but not within what you should do, direct to an appropriate source.\n"
-        "\nAVAILABLE ACTIONS:\n"
-        "To look up a patient ID, respond EXACTLY with: `LOOKUP_PATIENT: {name}, {dob}`\n"
-        "To get appointments, respond EXACTLY with: `GET_APPOINTMENTS: {patient_id}`\n"
-        "To get prescriptions, respond EXACTLY with: `GET_PRESCRIPTIONS: {patient_id}`\n"
-        "To get lab results, respond EXACTLY with: `GET_LABS: {patient_id}`\n"
-        "To find availability, respond EXACTLY with: `GET_AVAILABLE_SLOTS: {}`\n"
-        "When you use an action, you must output ONLY the action string and stop. I will provide the system result, and then you speak the answer naturally."
+        "6. You are a patient coordination assistant, not a medical professional. "
+        "7. If the user asks something completely unrelated to medical assistance, ignore it.\n"
+        "\nAVAILABLE INTERNAL TOOLS (NEVER ask the user to say these. YOU must generate these exact strings yourself to fetch data):\n"
+        "- To look up a patient ID, respond EXACTLY with: `LOOKUP_PATIENT: Name, YYYY-MM-DD`\n"
+        "- To get appointments, respond EXACTLY with: `GET_APPOINTMENTS: patient_id`\n"
+        "- To get prescriptions, respond EXACTLY with: `GET_PRESCRIPTIONS: patient_id`\n"
+        "- To get lab results, respond EXACTLY with: `GET_LABS: patient_id`\n"
+        "- To find availability, respond EXACTLY with: `GET_AVAILABLE_SLOTS: {}`\n"
+        "When using a tool, output ONLY the exact tool string and nothing else. Wait for the SYSTEM RESULT, then speak naturally to the user."
     )
     messages = [{"role": "system", "content": system_prompt}]
     accumulated_transcript = ""
@@ -118,9 +118,11 @@ async def websocket_audio_endpoint(websocket: WebSocket):
                                             MOCK_PRESCRIPTIONS, MOCK_LABS, MOCK_AVAILABLE_SLOTS
                                         )
                                         
-                                        if "LOOKUP_PATIENT:" in full_response:
+                                        resp_text = full_response.strip()
+                                        
+                                        if resp_text.startswith("LOOKUP_PATIENT:"):
                                             try:
-                                                parts = full_response.split("LOOKUP_PATIENT:")[1].strip().split(",")
+                                                parts = resp_text.split("LOOKUP_PATIENT:")[1].strip().split(",")
                                                 if len(parts) >= 2:
                                                     p = internal_lookup_patient(parts[0].strip(), parts[1].strip())
                                                     res_text = f"SYSTEM RESULT: {json.dumps(p) if p else 'Patient Not Found Database Mismatch.'}"
@@ -130,28 +132,28 @@ async def websocket_audio_endpoint(websocket: WebSocket):
                                             except Exception as e:
                                                 pass
                                                 
-                                        elif "GET_APPOINTMENTS:" in full_response:
-                                            pid = full_response.split("GET_APPOINTMENTS:")[1].strip()
+                                        elif resp_text.startswith("GET_APPOINTMENTS:"):
+                                            pid = resp_text.split("GET_APPOINTMENTS:")[1].strip()
                                             res_text = f"SYSTEM RESULT: {json.dumps(MOCK_APPOINTMENTS.get(pid, [str('No appointments found for ID ' + pid)]))}"
                                             print(f"[ACTION FIRED]: {res_text}")
                                             messages.append({"role": "system", "content": res_text})
                                             await process_llm()
                                             
-                                        elif "GET_PRESCRIPTIONS:" in full_response:
-                                            pid = full_response.split("GET_PRESCRIPTIONS:")[1].strip()
+                                        elif resp_text.startswith("GET_PRESCRIPTIONS:"):
+                                            pid = resp_text.split("GET_PRESCRIPTIONS:")[1].strip()
                                             res_text = f"SYSTEM RESULT: {json.dumps(MOCK_PRESCRIPTIONS.get(pid, [str('No prescriptions found for ID ' + pid)]))}"
                                             print(f"[ACTION FIRED]: {res_text}")
                                             messages.append({"role": "system", "content": res_text})
                                             await process_llm()
                                             
-                                        elif "GET_LABS:" in full_response:
-                                            pid = full_response.split("GET_LABS:")[1].strip()
+                                        elif resp_text.startswith("GET_LABS:"):
+                                            pid = resp_text.split("GET_LABS:")[1].strip()
                                             res_text = f"SYSTEM RESULT: {json.dumps(MOCK_LABS.get(pid, [str('No labs found for ID ' + pid)]))}"
                                             print(f"[ACTION FIRED]: {res_text}")
                                             messages.append({"role": "system", "content": res_text})
                                             await process_llm()
                                             
-                                        elif "GET_AVAILABLE_SLOTS:" in full_response:
+                                        elif resp_text.startswith("GET_AVAILABLE_SLOTS:"):
                                             res_text = f"SYSTEM RESULT: {json.dumps(MOCK_AVAILABLE_SLOTS)}"
                                             print(f"[ACTION FIRED]: {res_text}")
                                             messages.append({"role": "system", "content": res_text})
