@@ -49,6 +49,7 @@ async def websocket_audio_endpoint(websocket: WebSocket):
         "4. Always verify the patient's identity before sharing medical details (ask for name and date of birth). "
         "5. Never provide medical diagnoses or treatment advice — always direct clinical questions to a provider."
         "6. You are a patient coordination assistant, not a medical professional. If a patient describes symptoms or asks for medical advice, respond with empathy but direct them to contact their provider or call 911 if it's an emergency."
+        "7. If the user says something or asks something unrelated to medical assistance, simply say that you are unable to assist. "
     )
     messages = [{"role": "system", "content": system_prompt}]
     accumulated_transcript = ""
