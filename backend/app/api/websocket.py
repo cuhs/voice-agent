@@ -2,12 +2,19 @@ import asyncio
 import json
 import websockets
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
+from openai import AsyncOpenAI
 from app.core.config import settings
 
 router = APIRouter()
 
 DG_PARAMS = "model=nova-2&encoding=linear16&sample_rate=16000&channels=1&interim_results=true&utterance_end_ms=1000&vad_events=true"
 DEEPGRAM_URL = f"wss://api.deepgram.com/v1/listen?{DG_PARAMS}"
+
+# Initialize Groq client using OpenAI SDK
+llm_client = AsyncOpenAI(
+    api_key=settings.groq_api_key,
+    base_url="https://api.groq.com/openai/v1"
+)
 
 @router.websocket("/audio")
 async def websocket_audio_endpoint(websocket: WebSocket):
@@ -18,12 +25,21 @@ async def websocket_audio_endpoint(websocket: WebSocket):
         print("ERROR: deepgram_api_key not found in settings!")
         await websocket.close()
         return
-    else:
-        print("Deepgram key found")
+        
+    if not settings.groq_api_key:
+        print("ERROR: groq_api_key not found in settings!")
+        await websocket.close()
+        return
+        
+    print("Deepgram and Groq keys found")
 
     extra_headers = {
         "Authorization": f"Token {settings.deepgram_api_key}"
     }
+    
+    # State mechanism for conversation memory and transcript accumulation
+    messages = [{"role": "system", "content": "You are an AI voice assistant named Aura. Keep your responses extremely brief and friendly. Only answer questions related to food."}]
+    accumulated_transcript = ""
 
     try:
         async with websockets.connect(DEEPGRAM_URL, additional_headers=extra_headers) as dg_socket:
@@ -40,6 +56,7 @@ async def websocket_audio_endpoint(websocket: WebSocket):
                     print(f"Receiver error: {e}")
 
             async def sender():
+                nonlocal accumulated_transcript
                 try:
                     while True:
                         msg = await dg_socket.recv()
@@ -49,6 +66,34 @@ async def websocket_audio_endpoint(websocket: WebSocket):
 
                         if msg_type == "UtteranceEnd":
                             print(">>> [UtteranceEnd] User stopped speaking.")
+                            text_to_process = accumulated_transcript.strip()
+                            if text_to_process:
+                                # Reset buffer
+                                accumulated_transcript = ""
+                                print(f"\n--- Triggering Brain (Groq) with: '{text_to_process}' ---")
+                                messages.append({"role": "user", "content": text_to_process})
+                                
+                                # Spawn async LLM process so we don't block STT parsing
+                                async def process_llm():
+                                    try:
+                                        print("\nBot: ", end="")
+                                        stream = await llm_client.chat.completions.create(
+                                            model="llama-3.1-8b-instant",
+                                            messages=messages,
+                                            stream=True
+                                        )
+                                        full_response = ""
+                                        async for chunk in stream:
+                                            content = chunk.choices[0].delta.content if chunk.choices else None
+                                            if content:
+                                                print(content, end="", flush=True)
+                                                full_response += content
+                                        print("\n")
+                                        messages.append({"role": "assistant", "content": full_response})
+                                    except Exception as e:
+                                        print(f"[LLM Error]: {e}")
+                                        
+                                asyncio.create_task(process_llm())
                             continue
 
                         if msg_type == "Results":
@@ -61,6 +106,8 @@ async def websocket_audio_endpoint(websocket: WebSocket):
                             
                             if transcript:
                                 if is_final:
+                                    # Accumulate into our buffer
+                                    accumulated_transcript += transcript + " "
                                     print(f">>> [FINAL]: {transcript}")
                                 else:
                                     print(f"    [Interim]: {transcript}")
