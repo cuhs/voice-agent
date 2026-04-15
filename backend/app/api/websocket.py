@@ -62,7 +62,10 @@ async def websocket_audio_endpoint(websocket: WebSocket):
     accumulated_transcript = ""
 
     try:
-        async with websockets.connect(DEEPGRAM_URL, additional_headers=extra_headers) as dg_socket:
+        import ssl
+        import certifi
+        ssl_context = ssl.create_default_context(cafile=certifi.where())
+        async with websockets.connect(DEEPGRAM_URL, additional_headers=extra_headers, ssl=ssl_context) as dg_socket:
             print("Connected to Deepgram STT!")
 
             async def receiver():
@@ -107,7 +110,11 @@ async def websocket_audio_endpoint(websocket: WebSocket):
                                                 voice_id = "pNInz6obpgDQGcFmaJgB" 
                                                 elevenlabs_url = f"wss://api.elevenlabs.io/v1/text-to-speech/{voice_id}/stream-input?model_id=eleven_flash_v2_5&output_format=pcm_16000"
                                                 
-                                                tts_socket = await websockets.connect(elevenlabs_url)
+                                                import ssl
+                                                import certifi
+                                                ssl_context = ssl.create_default_context(cafile=certifi.where())
+                                                
+                                                tts_socket = await websockets.connect(elevenlabs_url, ssl=ssl_context)
                                                 print("Connected to ElevenLabs TTS!")
                                                 
                                                 init_msg = {
