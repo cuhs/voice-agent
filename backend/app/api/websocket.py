@@ -181,12 +181,17 @@ async def websocket_audio_endpoint(websocket: WebSocket):
                                         print("\n")
                                         messages.append({"role": "assistant", "content": full_response})
                                         
-                                        if tts_socket:
-                                            # Determine if it ended up being an action
-                                            action_keywords = ["LOOKUP_PATIENT:", "GET_APPOINTMENTS:", "GET_PRESCRIPTIONS:", "GET_LABS:", "GET_AVAILABLE_SLOTS:"]
-                                            if any(full_response.startswith(kw) for kw in action_keywords):
-                                                is_action = True
+                                        action_keywords = ["LOOKUP_PATIENT:", "GET_APPOINTMENTS:", "GET_PRESCRIPTIONS:", "GET_LABS:", "GET_AVAILABLE_SLOTS:"]
+                                        if any(full_response.startswith(kw) for kw in action_keywords):
+                                            is_action = True
                                             
+                                        if not is_action:
+                                            await websocket.send_text(json.dumps({
+                                                "type": "bot_response",
+                                                "text": full_response
+                                            }))
+                                        
+                                        if tts_socket:
                                             # Close the stream
                                             if not is_action:
                                                 await tts_socket.send(json.dumps({"text": ""}))
