@@ -46,10 +46,17 @@ async def websocket_audio_endpoint(websocket: WebSocket):
         "1. Keep responses concise (voice responses should be 1-3 sentences). "
         "2. Be warm and reassuring. "
         "3. Do not use markdown formatting. "
-        "4. Always verify the patient's identity before sharing medical details (ask for name and date of birth). "
-        "5. Never provide medical diagnoses or treatment advice — always direct clinical questions to a provider."
-        "6. You are a patient coordination assistant, not a medical professional. If a patient describes symptoms or asks for medical advice, respond with empathy but direct them to contact their provider or call 911 if it's an emergency."
-        "7. If the user says something or asks something unrelated to medical assistance, simply say that you are unable to assist. "
+        "4. Always verify the patient's identity before sharing medical details (ask for name and date of birth format YYYY-MM-DD). "
+        "5. Never provide medical diagnoses or treatment advice — always direct clinical questions to a provider.\n"
+        "6. You are a patient coordination assistant, not a medical professional. If a patient describes symptoms or asks for medical advice, respond with empathy but direct them to contact their provider or call 911 if it's an emergency.\n"
+        "7. If the user says something or asks something completely unrelated to medical assistance, simply say that you are unable to assist. if it is medical related but not within what you should do, direct to an appropriate source.\n"
+        "\nAVAILABLE ACTIONS:\n"
+        "To look up a patient ID, respond EXACTLY with: `LOOKUP_PATIENT: {name}, {dob}`\n"
+        "To get appointments, respond EXACTLY with: `GET_APPOINTMENTS: {patient_id}`\n"
+        "To get prescriptions, respond EXACTLY with: `GET_PRESCRIPTIONS: {patient_id}`\n"
+        "To get lab results, respond EXACTLY with: `GET_LABS: {patient_id}`\n"
+        "To find availability, respond EXACTLY with: `GET_AVAILABLE_SLOTS: {}`\n"
+        "When you use an action, you must output ONLY the action string and stop. I will provide the system result, and then you speak the answer naturally."
     )
     messages = [{"role": "system", "content": system_prompt}]
     accumulated_transcript = ""
@@ -78,12 +85,12 @@ async def websocket_audio_endpoint(websocket: WebSocket):
                         msg_type = res.get("type")
 
                         if msg_type == "UtteranceEnd":
-                            print(">>> [UtteranceEnd] User stopped speaking.")
+                            print("\n>>> [UtteranceEnd] User stopped speaking.")
                             text_to_process = accumulated_transcript.strip()
                             if text_to_process:
                                 # Reset buffer
                                 accumulated_transcript = ""
-                                print(f"\n--- Triggering Brain (Groq) with: '{text_to_process}' ---")
+                                print(f"--- Triggering Brain (Groq) with: '{text_to_process}' ---")
                                 messages.append({"role": "user", "content": text_to_process})
                                 
                                 # Spawn async LLM process so we don't block STT parsing
@@ -97,12 +104,59 @@ async def websocket_audio_endpoint(websocket: WebSocket):
                                         )
                                         full_response = ""
                                         async for chunk in stream:
+                                            # Validate the content packet safely
                                             content = chunk.choices[0].delta.content if chunk.choices else None
                                             if content:
                                                 print(content, end="", flush=True)
                                                 full_response += content
                                         print("\n")
                                         messages.append({"role": "assistant", "content": full_response})
+                                        
+                                        # ---- ACTION INTERCEPTION (Pseudo Tool Calling) ----
+                                        from app.api.endpoints import (
+                                            internal_lookup_patient, MOCK_APPOINTMENTS, 
+                                            MOCK_PRESCRIPTIONS, MOCK_LABS, MOCK_AVAILABLE_SLOTS
+                                        )
+                                        
+                                        if "LOOKUP_PATIENT:" in full_response:
+                                            try:
+                                                parts = full_response.split("LOOKUP_PATIENT:")[1].strip().split(",")
+                                                if len(parts) >= 2:
+                                                    p = internal_lookup_patient(parts[0].strip(), parts[1].strip())
+                                                    res_text = f"SYSTEM RESULT: {json.dumps(p) if p else 'Patient Not Found Database Mismatch.'}"
+                                                    print(f"[ACTION FIRED]: {res_text}")
+                                                    messages.append({"role": "system", "content": res_text})
+                                                    await process_llm() # Automatically follow-up!
+                                            except Exception as e:
+                                                pass
+                                                
+                                        elif "GET_APPOINTMENTS:" in full_response:
+                                            pid = full_response.split("GET_APPOINTMENTS:")[1].strip()
+                                            res_text = f"SYSTEM RESULT: {json.dumps(MOCK_APPOINTMENTS.get(pid, [str('No appointments found for ID ' + pid)]))}"
+                                            print(f"[ACTION FIRED]: {res_text}")
+                                            messages.append({"role": "system", "content": res_text})
+                                            await process_llm()
+                                            
+                                        elif "GET_PRESCRIPTIONS:" in full_response:
+                                            pid = full_response.split("GET_PRESCRIPTIONS:")[1].strip()
+                                            res_text = f"SYSTEM RESULT: {json.dumps(MOCK_PRESCRIPTIONS.get(pid, [str('No prescriptions found for ID ' + pid)]))}"
+                                            print(f"[ACTION FIRED]: {res_text}")
+                                            messages.append({"role": "system", "content": res_text})
+                                            await process_llm()
+                                            
+                                        elif "GET_LABS:" in full_response:
+                                            pid = full_response.split("GET_LABS:")[1].strip()
+                                            res_text = f"SYSTEM RESULT: {json.dumps(MOCK_LABS.get(pid, [str('No labs found for ID ' + pid)]))}"
+                                            print(f"[ACTION FIRED]: {res_text}")
+                                            messages.append({"role": "system", "content": res_text})
+                                            await process_llm()
+                                            
+                                        elif "GET_AVAILABLE_SLOTS:" in full_response:
+                                            res_text = f"SYSTEM RESULT: {json.dumps(MOCK_AVAILABLE_SLOTS)}"
+                                            print(f"[ACTION FIRED]: {res_text}")
+                                            messages.append({"role": "system", "content": res_text})
+                                            await process_llm()
+
                                     except Exception as e:
                                         print(f"[LLM Error]: {e}")
                                         
