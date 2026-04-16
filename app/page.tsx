@@ -135,8 +135,9 @@ export default function Home() {
         getStream: async () => stream,
         baseAssetPath: "https://cdn.jsdelivr.net/npm/@ricky0123/vad-web/dist/",
         onnxWASMBasePath: "https://cdn.jsdelivr.net/npm/onnxruntime-web/dist/",
-        positiveSpeechThreshold: 0.5,
-        redemptionMs: 600,
+        positiveSpeechThreshold: 0.6, //threshold for positive speech
+        redemptionMs: 600, //how long to conclude you're done talking
+        minSpeechMs: 100,
         onSpeechStart: () => {
           console.log("VAD: Speech Start");
           if (scheduledSourcesRef.current.length > 0) {
