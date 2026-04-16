@@ -24,6 +24,11 @@ export default function Home() {
   const scheduledSourcesRef = useRef<AudioBufferSourceNode[]>([]);
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+  const micAnalyserRef = useRef<AnalyserNode | null>(null);
+  const botAnalyserRef = useRef<AnalyserNode | null>(null);
+  const animationFrameRef = useRef<number>(0);
+
   const scrollToBottom = () => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
   };
@@ -31,6 +36,19 @@ export default function Home() {
   useEffect(() => {
     scrollToBottom();
   }, [chatHistory, interimTranscript]);
+
+  // Start/stop waveform animation when recording state changes
+  useEffect(() => {
+    if (isRecording && canvasRef.current) {
+      drawWaveform();
+    }
+    return () => {
+      if (animationFrameRef.current) {
+        cancelAnimationFrame(animationFrameRef.current);
+        animationFrameRef.current = 0;
+      }
+    };
+  }, [isRecording]);
 
   const connectWebSocket = () => {
     const ws = new WebSocket("ws://127.0.0.1:8000/api/v1/ws/audio");
@@ -57,7 +75,13 @@ export default function Home() {
 
           const source = audioContextRef.current.createBufferSource();
           source.buffer = audioBuffer;
-          source.connect(audioContextRef.current.destination);
+
+          if (!botAnalyserRef.current) {
+            botAnalyserRef.current = audioContextRef.current.createAnalyser();
+            botAnalyserRef.current.fftSize = 256;
+            botAnalyserRef.current.connect(audioContextRef.current.destination);
+          }
+          source.connect(botAnalyserRef.current);
 
           scheduledSourcesRef.current.push(source);
 
@@ -111,6 +135,67 @@ export default function Home() {
       console.error("WebSocket error:", err);
       setStatus("error");
     };
+  };
+
+  const drawWaveform = () => {
+    if (!canvasRef.current) return;
+    const canvas = canvasRef.current;
+    const canvasCtx = canvas.getContext("2d");
+    if (!canvasCtx) return;
+
+    const micAnalyser = micAnalyserRef.current;
+    const botAnalyser = botAnalyserRef.current;
+
+    const bufferLength = micAnalyser ? micAnalyser.frequencyBinCount : 128;
+    const micDataArray = new Uint8Array(bufferLength);
+    if (micAnalyser) micAnalyser.getByteTimeDomainData(micDataArray);
+
+    let botDataArray = null;
+    if (botAnalyser) {
+      botDataArray = new Uint8Array(botAnalyser.frequencyBinCount);
+      botAnalyser.getByteTimeDomainData(botDataArray);
+    }
+
+    canvasCtx.clearRect(0, 0, canvas.width, canvas.height);
+    canvasCtx.lineWidth = 2;
+
+    const drawLine = (dataArray: Uint8Array, color: string) => {
+      canvasCtx.beginPath();
+      canvasCtx.strokeStyle = color;
+      const sliceWidth = canvas.width * 1.0 / bufferLength;
+      let x = 0;
+      for (let i = 0; i < bufferLength; i++) {
+        const v = dataArray[i] / 128.0;
+        const y = v * canvas.height / 2;
+        if (i === 0) {
+          canvasCtx.moveTo(x, y);
+        } else {
+          canvasCtx.lineTo(x, y);
+        }
+        x += sliceWidth;
+      }
+      canvasCtx.lineTo(canvas.width, canvas.height / 2);
+      canvasCtx.stroke();
+    };
+
+    let isBotActive = false;
+    if (botDataArray) {
+      for(let i=0; i<botDataArray.length; i++) {
+        if (Math.abs(128 - botDataArray[i]) > 2) isBotActive = true;
+      }
+    }
+
+    // Only draw the active speaker's line, or mic by default
+    if (isBotActive && botDataArray) {
+      drawLine(botDataArray, "#60a5fa"); // Blue for bot
+    } else if (micAnalyser) {
+      drawLine(micDataArray, "#4ade80"); // Green for mic
+    } else {
+      // Flat line if neither
+      drawLine(new Uint8Array(bufferLength).fill(128), "#475569");
+    }
+
+    animationFrameRef.current = requestAnimationFrame(drawWaveform);
   };
 
   const startRecording = async () => {
@@ -187,6 +272,11 @@ export default function Home() {
         }
       };
 
+      const micAnalyser = audioContext.createAnalyser();
+      micAnalyser.fftSize = 256;
+      source.connect(micAnalyser);
+      micAnalyserRef.current = micAnalyser;
+
       source.connect(workletNode);
 
       setIsRecording(true);
@@ -196,8 +286,19 @@ export default function Home() {
       setStatus("error");
     }
   };
-
   const stopRecording = () => {
+    if (animationFrameRef.current) {
+      cancelAnimationFrame(animationFrameRef.current);
+      animationFrameRef.current = 0;
+    }
+
+    if (canvasRef.current) {
+       const ctx = canvasRef.current.getContext("2d");
+       if (ctx) ctx.clearRect(0, 0, canvasRef.current.width, canvasRef.current.height);
+    }
+    micAnalyserRef.current = null;
+    botAnalyserRef.current = null;
+
     if (vadRef.current) {
       vadRef.current.pause();
       vadRef.current = null;
@@ -280,36 +381,15 @@ export default function Home() {
           <div ref={messagesEndRef} />
         </div>
 
-        {isBotSpeaking && (
+        {isRecording && (
           <div style={styles.speakingIndicator}>
-            <div style={styles.waveform}>
-              <div className="bar"></div>
-              <div className="bar"></div>
-              <div className="bar"></div>
-              <div className="bar"></div>
-            </div>
-            <span>Medi is speaking...</span>
+            <canvas ref={canvasRef} width={160} height={32} style={styles.canvas}></canvas>
+            <span>{isBotSpeaking ? "Medi is speaking..." : "Listening..."}</span>
           </div>
         )}
       </main>
 
       <style>{`
-        @keyframes pulse {
-          0% { height: 4px; }
-          50% { height: 16px; }
-          100% { height: 4px; }
-        }
-        .bar {
-            width: 4px;
-            background: #3b82f6;
-            margin: 0 2px;
-            border-radius: 4px;
-            animation: pulse 1s infinite ease-in-out;
-        }
-        .bar:nth-child(1) { animation-delay: 0.0s; }
-        .bar:nth-child(2) { animation-delay: 0.2s; }
-        .bar:nth-child(3) { animation-delay: 0.4s; }
-        .bar:nth-child(4) { animation-delay: 0.1s; }
       `}</style>
     </div>
   );
@@ -477,9 +557,7 @@ const styles: Record<string, React.CSSProperties> = {
     boxShadow: "0 10px 15px -3px rgba(0, 0, 0, 0.2), 0 0 20px rgba(59, 130, 246, 0.15)",
     zIndex: 20
   },
-  waveform: {
-    display: "flex",
-    alignItems: "center",
-    height: "16px"
+  canvas: {
+    borderRadius: "6px"
   }
 };

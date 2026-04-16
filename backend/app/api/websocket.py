@@ -174,6 +174,7 @@ async def websocket_audio_endpoint(websocket: WebSocket):
                                         full_response = ""
                                         is_action_determined = False
                                         is_action = False
+                                        response_sent = False
                                         
                                         async for chunk in stream:
                                             content = chunk.choices[0].delta.content if chunk.choices else None
@@ -210,6 +211,7 @@ async def websocket_audio_endpoint(websocket: WebSocket):
                                                 "type": "bot_response",
                                                 "text": full_response
                                             }))
+                                            response_sent = True
                                         
                                         if tts_socket:
                                             # Close the stream
@@ -271,14 +273,13 @@ async def websocket_audio_endpoint(websocket: WebSocket):
                                     except asyncio.CancelledError:
                                         print("\n[LLM Task Cancelled by User Interrupt]")
                                         
-                                        # Send whatever text the bot generated to the frontend and save to backend memory
-                                        if 'full_response' in locals() and full_response.strip():
-                                            if not messages or messages[-1].get("content") != full_response:
-                                                messages.append({"role": "assistant", "content": full_response})
-                                                asyncio.create_task(websocket.send_text(json.dumps({
-                                                    "type": "bot_response",
-                                                    "text": full_response
-                                                })))
+                                        # Send whatever text the bot generated (only if not already sent)
+                                        if not response_sent and 'full_response' in locals() and full_response.strip():
+                                            messages.append({"role": "assistant", "content": full_response})
+                                            asyncio.create_task(websocket.send_text(json.dumps({
+                                                "type": "bot_response",
+                                                "text": full_response
+                                            })))
                                                 
                                         try:
                                             if 'tts_socket' in locals() and tts_socket:
