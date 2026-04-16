@@ -270,6 +270,16 @@ async def websocket_audio_endpoint(websocket: WebSocket):
 
                                     except asyncio.CancelledError:
                                         print("\n[LLM Task Cancelled by User Interrupt]")
+                                        
+                                        # Send whatever text the bot generated to the frontend and save to backend memory
+                                        if 'full_response' in locals() and full_response.strip():
+                                            if not messages or messages[-1].get("content") != full_response:
+                                                messages.append({"role": "assistant", "content": full_response})
+                                                asyncio.create_task(websocket.send_text(json.dumps({
+                                                    "type": "bot_response",
+                                                    "text": full_response
+                                                })))
+                                                
                                         try:
                                             if 'tts_socket' in locals() and tts_socket:
                                                 asyncio.create_task(tts_socket.close())
