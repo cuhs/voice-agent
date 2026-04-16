@@ -19,6 +19,7 @@ export default function Home() {
   const audioContextRef = useRef<AudioContext | null>(null);
   const workletNodeRef = useRef<AudioWorkletNode | null>(null);
   const wsRef = useRef<WebSocket | null>(null);
+  const vadRef = useRef<any>(null);
   const nextStartTimeRef = useRef<number>(0);
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
@@ -119,6 +120,28 @@ export default function Home() {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
       streamRef.current = stream;
 
+      const { MicVAD } = await import("@ricky0123/vad-web");
+      const ort = await import("onnxruntime-web");
+      
+      ort.env.wasm.wasmPaths = "https://cdn.jsdelivr.net/npm/onnxruntime-web/dist/";
+      ort.env.wasm.numThreads = 1;
+
+      const myvad = await MicVAD.new({
+        getStream: async () => stream,
+        baseAssetPath: "https://cdn.jsdelivr.net/npm/@ricky0123/vad-web/dist/",
+        onnxWASMBasePath: "https://cdn.jsdelivr.net/npm/onnxruntime-web/dist/",
+        positiveSpeechThreshold: 0.5,
+        redemptionMs: 600,
+        onSpeechStart: () => {
+          console.log("VAD: Speech Start");
+        },
+        onSpeechEnd: (audio: Float32Array) => {
+          console.log("VAD: Speech End");
+        }
+      });
+      vadRef.current = myvad;
+      myvad.start();
+
       const audioContext = new (window.AudioContext || (window as any).webkitAudioContext)({
         sampleRate: 16000,
       });
@@ -155,6 +178,11 @@ export default function Home() {
   };
 
   const stopRecording = () => {
+    if (vadRef.current) {
+      vadRef.current.pause();
+      vadRef.current = null;
+    }
+
     if (workletNodeRef.current) {
       workletNodeRef.current.disconnect();
       workletNodeRef.current = null;
