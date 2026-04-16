@@ -21,6 +21,7 @@ export default function Home() {
   const wsRef = useRef<WebSocket | null>(null);
   const vadRef = useRef<any>(null);
   const nextStartTimeRef = useRef<number>(0);
+  const scheduledSourcesRef = useRef<AudioBufferSourceNode[]>([]);
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
   const scrollToBottom = () => {
@@ -43,7 +44,7 @@ export default function Home() {
       if (event.data instanceof Blob) {
         setIsBotSpeaking(true);
         const arrayBuffer = await event.data.arrayBuffer();
-        
+
         const int16Data = new Int16Array(arrayBuffer);
         const float32Data = new Float32Array(int16Data.length);
         for (let i = 0; i < int16Data.length; i++) {
@@ -58,6 +59,8 @@ export default function Home() {
           source.buffer = audioBuffer;
           source.connect(audioContextRef.current.destination);
 
+          scheduledSourcesRef.current.push(source);
+
           const currentTime = audioContextRef.current.currentTime;
           if (nextStartTimeRef.current < currentTime) {
             nextStartTimeRef.current = currentTime + 0.1;
@@ -67,6 +70,7 @@ export default function Home() {
           nextStartTimeRef.current += audioBuffer.duration;
 
           source.onended = () => {
+            scheduledSourcesRef.current = scheduledSourcesRef.current.filter((s) => s !== source);
             if (audioContextRef.current && audioContextRef.current.currentTime >= nextStartTimeRef.current - 0.05) {
               setIsBotSpeaking(false);
             }
@@ -75,16 +79,16 @@ export default function Home() {
       } else if (typeof event.data === 'string') {
         try {
           const msg = JSON.parse(event.data);
-          
+
           if (msg.type === "transcript") {
             if (msg.is_final) {
               setChatHistory(prev => {
-                  const last = prev[prev.length - 1];
-                  if (last && last.role === "user") {
-                      return [...prev.slice(0, -1), { role: "user", text: last.text + " " + msg.text }];
-                  } else {
-                      return [...prev, { role: "user", text: msg.text }];
-                  }
+                const last = prev[prev.length - 1];
+                if (last && last.role === "user") {
+                  return [...prev.slice(0, -1), { role: "user", text: last.text + " " + msg.text }];
+                } else {
+                  return [...prev, { role: "user", text: msg.text }];
+                }
               });
               setInterimTranscript("");
             } else {
@@ -115,6 +119,7 @@ export default function Home() {
       setChatHistory([]);
       setInterimTranscript("");
       nextStartTimeRef.current = 0;
+      scheduledSourcesRef.current = [];
       connectWebSocket();
 
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
@@ -122,7 +127,7 @@ export default function Home() {
 
       const { MicVAD } = await import("@ricky0123/vad-web");
       const ort = await import("onnxruntime-web");
-      
+
       ort.env.wasm.wasmPaths = "https://cdn.jsdelivr.net/npm/onnxruntime-web/dist/";
       ort.env.wasm.numThreads = 1;
 
@@ -134,6 +139,20 @@ export default function Home() {
         redemptionMs: 600,
         onSpeechStart: () => {
           console.log("VAD: Speech Start");
+          if (scheduledSourcesRef.current.length > 0) {
+            console.log("Interrupting bot playback...");
+            scheduledSourcesRef.current.forEach((s) => {
+              try { s.stop(); } catch (e) { }
+              try { s.disconnect(); } catch (e) { }
+            });
+            scheduledSourcesRef.current = [];
+            nextStartTimeRef.current = 0;
+            setIsBotSpeaking(false);
+
+            if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+              wsRef.current.send(JSON.stringify({ type: "interrupt" }));
+            }
+          }
         },
         onSpeechEnd: (audio: Float32Array) => {
           console.log("VAD: Speech End");
@@ -155,7 +174,7 @@ export default function Home() {
 
       workletNode.port.onmessage = (event) => {
         const float32Data = event.data as Float32Array;
-        
+
         const int16Data = new Int16Array(float32Data.length);
         for (let i = 0; i < float32Data.length; i++) {
           const s = Math.max(-1, Math.min(1, float32Data[i]));
@@ -224,7 +243,7 @@ export default function Home() {
         </div>
         <div style={styles.controlPanel}>
           <div style={styles.statusIndicator}>
-            <div style={{...styles.dot, backgroundColor: status === "listening" ? "#4ade80" : status === "connected" ? "#fbbf24" : "#f87171"}}></div>
+            <div style={{ ...styles.dot, backgroundColor: status === "listening" ? "#4ade80" : status === "connected" ? "#fbbf24" : "#f87171" }}></div>
             <span style={styles.statusText}>{status.toUpperCase()}</span>
           </div>
           <button onClick={handleToggle} style={isRecording ? styles.stopButton : styles.startButton}>
@@ -243,7 +262,7 @@ export default function Home() {
           )}
 
           {chatHistory.map((msg, idx) => (
-            <div key={idx} style={{...styles.messageWrapper, justifyContent: msg.role === "user" ? "flex-end" : "flex-start"}}>
+            <div key={idx} style={{ ...styles.messageWrapper, justifyContent: msg.role === "user" ? "flex-end" : "flex-start" }}>
               <div style={msg.role === "user" ? styles.userMessage : styles.botMessage}>
                 {msg.text}
               </div>
@@ -251,8 +270,8 @@ export default function Home() {
           ))}
 
           {interimTranscript && (
-            <div style={{...styles.messageWrapper, justifyContent: "flex-end"}}>
-              <div style={{...styles.userMessage, ...styles.interimMessage}}>
+            <div style={{ ...styles.messageWrapper, justifyContent: "flex-end" }}>
+              <div style={{ ...styles.userMessage, ...styles.interimMessage }}>
                 {interimTranscript}...
               </div>
             </div>

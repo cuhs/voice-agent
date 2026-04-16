@@ -60,6 +60,7 @@ async def websocket_audio_endpoint(websocket: WebSocket):
     )
     messages = [{"role": "system", "content": system_prompt}]
     accumulated_transcript = ""
+    current_llm_task = None
 
     try:
         import ssl
@@ -69,10 +70,22 @@ async def websocket_audio_endpoint(websocket: WebSocket):
             print("Connected to Deepgram STT!")
 
             async def receiver():
+                nonlocal current_llm_task
                 try:
                     while True:
-                        data = await websocket.receive_bytes()
-                        await dg_socket.send(data)
+                        data = await websocket.receive()
+                        if "bytes" in data:
+                            await dg_socket.send(data["bytes"])
+                        elif "text" in data:
+                            try:
+                                msg = json.loads(data["text"])
+                                if msg.get("type") == "interrupt":
+                                    print("\n--- Frontend sent interrupt. Cancelling processing. ---")
+                                    if current_llm_task and not current_llm_task.done():
+                                        current_llm_task.cancel()
+                                    await websocket.send_text(json.dumps({"type": "interrupt_ack"}))
+                            except json.JSONDecodeError:
+                                pass
                 except WebSocketDisconnect:
                     print("Frontend client disconnected.")
                 except Exception as e:
@@ -255,10 +268,21 @@ async def websocket_audio_endpoint(websocket: WebSocket):
                                             messages.append({"role": "user", "content": res_text})
                                             await process_llm()
 
+                                    except asyncio.CancelledError:
+                                        print("\n[LLM Task Cancelled by User Interrupt]")
+                                        try:
+                                            if 'tts_socket' in locals() and tts_socket:
+                                                asyncio.create_task(tts_socket.close())
+                                        except Exception:
+                                            pass
+                                        raise
                                     except Exception as e:
                                         print(f"[LLM Error]: {e}")
                                         
-                                asyncio.create_task(process_llm())
+                                nonlocal current_llm_task
+                                if current_llm_task and not current_llm_task.done():
+                                    current_llm_task.cancel()
+                                current_llm_task = asyncio.create_task(process_llm())
                             continue
 
                         if msg_type == "Results":
