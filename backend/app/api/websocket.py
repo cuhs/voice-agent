@@ -37,30 +37,42 @@ async def websocket_audio_endpoint(websocket: WebSocket):
         "Authorization": f"Token {settings.deepgram_api_key}"
     }
     
-    # State mechanism for conversation memory and transcript accumulation
-    system_prompt = (
-        "You are Medi, a voice assistant for Greenfield Medical Group. "
-        "You help patients check upcoming appointments, request prescription refills, "
-        "retrieve lab results, and answer general questions about the practice. "
-        "Rules: "
-        "1. Keep responses concise (voice responses should be 1-3 sentences). "
-        "2. Be warm and reassuring. "
-        "3. You are a VOICE agent. So don't say stuff as if you are a text chat bot"
-        "4. Do not use markdown formatting. "
-        "5. Always verify the patient's identity before sharing medical details (ask for name and date of birth format YYYY-MM-DD). "
-        "6. Never provide medical diagnoses or treatment advice — always direct clinical questions to a provider.\n"
-        "7. You are a patient coordination assistant, not a medical professional. "
-        "8. If the user asks something completely unrelated to medical assistance, ignore it.\n"
-        "\nAVAILABLE INTERNAL TOOLS (NEVER ask the user to say these. YOU must generate these exact strings yourself to fetch data):\n"
-        "- To look up a patient ID, respond EXACTLY with: `LOOKUP_PATIENT: Name, YYYY-MM-DD`\n"
-        "- To get appointments, respond EXACTLY with: `GET_APPOINTMENTS: patient_id`\n"
-        "- To get prescriptions, respond EXACTLY with: `GET_PRESCRIPTIONS: patient_id`\n"
-        "- To get lab results, respond EXACTLY with: `GET_LABS: patient_id`\n"
-        "- To find availability, respond EXACTLY with: `GET_AVAILABLE_SLOTS: {}`\n"
-        "When using a tool, output ONLY the exact tool string and nothing else. Wait for the SYSTEM RESULT, then speak naturally to the user."
-    )
-    messages = [{"role": "system", "content": system_prompt}]
+    # State machine initialization
+    current_state = "GREETING"
+
+    def get_system_prompt():
+        base = (
+            "You are Medi, an AI voice receptionist for Greenfield Medical Group. "
+            "1. Keep responses concise (voice responses should be 1-2 sentences). "
+            "2. Be warm and reassuring. You are a VOICE agent, speak naturally. "
+            "3. Do not invent data. Use tools to look up reality. "
+            "4. Only answer medical administrative requests. "
+            f"\nCURRENT CONVERSATION STATE: {current_state}\n"
+        )
+        if current_state == "GREETING":
+            return base + "Goal: Greet the patient warmly. If they have a request, use transition_state to move to VERIFICATION."
+        elif current_state == "VERIFICATION":
+            return base + "Goal: Ask their name and DOB. Once provided, use lookup_patient. If successful, use transition_state to move to AUTHENTICATED."
+        elif current_state == "AUTHENTICATED":
+            return base + "Goal: Acknowledge you found them. Ask what info they need. Use transition_state to move to SERVICING."
+        elif current_state == "SERVICING":
+            return base + "Goal: Use tools to fetch their labs/prescriptions/appointments. Use transition_state to move to SCHEDULING if they want to book, or CLOSING if done."
+        elif current_state == "SCHEDULING":
+            return base + "Goal: Use get_available_slots to find slots. Help them schedule. Use transition_state to move to CLOSING."
+        else: # CLOSING
+            return base + "Goal: Ask if they need anything else. If not, say goodbye politely."
+
+    messages = [{"role": "system", "content": get_system_prompt()}]
     accumulated_transcript = ""
+
+    TOOLS = [
+        {"type": "function", "function": {"name": "transition_state", "description": "Move the conversation to a new state.", "parameters": {"type": "object", "properties": {"new_state": {"type": "string", "enum": ["GREETING", "VERIFICATION", "AUTHENTICATED", "SERVICING", "SCHEDULING", "CLOSING"]}}, "required": ["new_state"]}}},
+        {"type": "function", "function": {"name": "lookup_patient", "description": "Look up patient by name and DOB.", "parameters": {"type": "object", "properties": {"name": {"type": "string"}, "dob": {"type": "string", "description": "YYYY-MM-DD"}}, "required": ["name", "dob"]}}},
+        {"type": "function", "function": {"name": "get_appointments", "description": "Get appointments for a patient.", "parameters": {"type": "object", "properties": {"patient_id": {"type": "string"}}, "required": ["patient_id"]}}},
+        {"type": "function", "function": {"name": "get_prescriptions", "description": "Get prescriptions for a patient.", "parameters": {"type": "object", "properties": {"patient_id": {"type": "string"}}, "required": ["patient_id"]}}},
+        {"type": "function", "function": {"name": "get_labs", "description": "Get lab results for a patient.", "parameters": {"type": "object", "properties": {"patient_id": {"type": "string"}}, "required": ["patient_id"]}}},
+        {"type": "function", "function": {"name": "get_available_slots", "description": "Find available openings to book an appointment.", "parameters": {"type": "object", "properties": {}}}}
+    ]
     current_llm_task = None
 
     try:
@@ -108,6 +120,7 @@ async def websocket_audio_endpoint(websocket: WebSocket):
                                 # Reset buffer
                                 accumulated_transcript = ""
                                 print(f"--- Triggering Brain (Groq) with: '{text_to_process}' ---")
+                                messages[0]["content"] = get_system_prompt()
                                 messages.append({"role": "user", "content": text_to_process})
                                 
                                 # Spawn async LLM process so we don't block STT parsing
@@ -170,44 +183,38 @@ async def websocket_audio_endpoint(websocket: WebSocket):
                                         stream = await llm_client.chat.completions.create(
                                             model="llama-3.1-8b-instant",
                                             messages=messages,
-                                            stream=True
+                                            stream=True,
+                                            tools=TOOLS,
+                                            tool_choice="auto"
                                         )
                                         full_response = ""
-                                        is_action_determined = False
                                         is_action = False
                                         response_sent = False
                                         
+                                        tool_calls_buffer = {}
+
                                         async for chunk in stream:
-                                            content = chunk.choices[0].delta.content if chunk.choices else None
+                                            delta = chunk.choices[0].delta
+                                            if delta.tool_calls:
+                                                is_action = True
+                                                for tc in delta.tool_calls:
+                                                    if tc.id:
+                                                        tool_calls_buffer[tc.index] = {"id": tc.id, "function": {"name": tc.function.name, "arguments": ""}}
+                                                    if tc.function.arguments:
+                                                        tool_calls_buffer[tc.index]["function"]["arguments"] += tc.function.arguments
+                                            
+                                            content = delta.content
                                             if content:
                                                 print(content, end="", flush=True)
                                                 full_response += content
-                                                
                                                 if tts_socket:
-                                                    if not is_action_determined:
-                                                        action_keywords = ["LOOKUP_PATIENT:", "GET_APPOINTMENTS:", "GET_PRESCRIPTIONS:", "GET_LABS:", "GET_AVAILABLE_SLOTS:"]
-                                                        match_possible = False
-                                                        for kw in action_keywords:
-                                                            if kw.startswith(full_response) or full_response.startswith(kw):
-                                                                match_possible = True
-                                                                break
-                                                        
-                                                        if not match_possible:
-                                                            is_action_determined = True
-                                                            is_action = False
-                                                            await tts_socket.send(json.dumps({"text": full_response, "try_trigger_generation": True}))
-                                                    else:
-                                                        if not is_action:
-                                                            await tts_socket.send(json.dumps({"text": content, "try_trigger_generation": True}))
+                                                    await tts_socket.send(json.dumps({"text": content, "try_trigger_generation": True}))
 
                                         print("\n")
-                                        messages.append({"role": "assistant", "content": full_response})
+                                        if full_response.strip():
+                                            messages.append({"role": "assistant", "content": full_response})
                                         
-                                        action_keywords = ["LOOKUP_PATIENT:", "GET_APPOINTMENTS:", "GET_PRESCRIPTIONS:", "GET_LABS:", "GET_AVAILABLE_SLOTS:"]
-                                        if any(full_response.startswith(kw) for kw in action_keywords):
-                                            is_action = True
-                                            
-                                        if not is_action:
+                                        if not is_action and full_response.strip():
                                             await websocket.send_text(json.dumps({
                                                 "type": "bot_response",
                                                 "text": full_response
@@ -215,7 +222,6 @@ async def websocket_audio_endpoint(websocket: WebSocket):
                                             response_sent = True
                                         
                                         if tts_socket:
-                                            # Close the stream
                                             if not is_action:
                                                 await tts_socket.send(json.dumps({"text": ""}))
                                                 try:
@@ -224,52 +230,48 @@ async def websocket_audio_endpoint(websocket: WebSocket):
                                                     pass
                                             await tts_socket.close()
 
-                                        # ---- ACTION INTERCEPTION (Pseudo Tool Calling) ----
-                                        from app.api.endpoints import (
-                                            internal_lookup_patient, MOCK_APPOINTMENTS, 
-                                            MOCK_PRESCRIPTIONS, MOCK_LABS, MOCK_AVAILABLE_SLOTS
-                                        )
-                                        
-                                        resp_text = full_response.strip()
-                                        
-                                        if resp_text.startswith("LOOKUP_PATIENT:"):
-                                            try:
-                                                parts = resp_text.split("LOOKUP_PATIENT:")[1].strip().split(",")
-                                                if len(parts) >= 2:
-                                                    p = internal_lookup_patient(parts[0].strip(), parts[1].strip())
-                                                    res_text = f"[INTERNAL DATABASE RESPONSE (Do not read this text verbatim. Speak this naturally to the user)]: {json.dumps(p) if p else 'Patient Not Found.'}"
-                                                    print(f"[ACTION FIRED]: {res_text}")
-                                                    messages.append({"role": "user", "content": res_text})
-                                                    await process_llm() # Automatically follow-up!
-                                            except Exception as e:
-                                                pass
+                                        # ---- NATIVE TOOL EXECUTIONS ----
+                                        if is_action:
+                                            from app.api.endpoints import (
+                                                internal_lookup_patient, MOCK_APPOINTMENTS, 
+                                                MOCK_PRESCRIPTIONS, MOCK_LABS, MOCK_AVAILABLE_SLOTS
+                                            )
+                                            # Append tool calls to message history
+                                            tcs = []
+                                            for idx, tc in tool_calls_buffer.items():
+                                                tcs.append({"id": tc["id"], "type": "function", "function": {"name": tc["function"]["name"], "arguments": tc["function"]["arguments"]}})
+                                            
+                                            messages.append({"role": "assistant", "tool_calls": tcs})
+                                            
+                                            for idx, tc in tool_calls_buffer.items():
+                                                tool_name = tc["function"]["name"]
+                                                try:
+                                                    args = json.loads(tc["function"]["arguments"])
+                                                except:
+                                                    args = {}
                                                 
-                                        elif resp_text.startswith("GET_APPOINTMENTS:"):
-                                            pid = resp_text.split("GET_APPOINTMENTS:")[1].strip()
-                                            res_text = f"[INTERNAL DATABASE RESPONSE (Do not read this text verbatim. Speak this naturally to the user)]: {json.dumps(MOCK_APPOINTMENTS.get(pid, [str('No appointments found.')]))}"
-                                            print(f"[ACTION FIRED]: {res_text}")
-                                            messages.append({"role": "user", "content": res_text})
-                                            await process_llm()
-                                            
-                                        elif resp_text.startswith("GET_PRESCRIPTIONS:"):
-                                            pid = resp_text.split("GET_PRESCRIPTIONS:")[1].strip()
-                                            res_text = f"[INTERNAL DATABASE RESPONSE (Do not read this text verbatim. Speak this naturally to the user)]: {json.dumps(MOCK_PRESCRIPTIONS.get(pid, [str('No prescriptions found.')]))}"
-                                            print(f"[ACTION FIRED]: {res_text}")
-                                            messages.append({"role": "user", "content": res_text})
-                                            await process_llm()
-                                            
-                                        elif resp_text.startswith("GET_LABS:"):
-                                            pid = resp_text.split("GET_LABS:")[1].strip()
-                                            res_text = f"[INTERNAL DATABASE RESPONSE (Do not read this text verbatim. Speak this naturally to the user)]: {json.dumps(MOCK_LABS.get(pid, [str('No labs found.')]))}"
-                                            print(f"[ACTION FIRED]: {res_text}")
-                                            messages.append({"role": "user", "content": res_text})
-                                            await process_llm()
-                                            
-                                        elif resp_text.startswith("GET_AVAILABLE_SLOTS:"):
-                                            res_text = f"[INTERNAL DATABASE RESPONSE (Do not read this text verbatim. Speak this naturally to the user)]: {json.dumps(MOCK_AVAILABLE_SLOTS)}"
-                                            print(f"[ACTION FIRED]: {res_text}")
-                                            messages.append({"role": "user", "content": res_text})
-                                            await process_llm()
+                                                print(f"[TOOL EXECUTED]: {tool_name} with {args}")
+                                                res_data = "Unknown Tool"
+                                                
+                                                if tool_name == "transition_state":
+                                                    nonlocal current_state
+                                                    current_state = args.get("new_state", current_state)
+                                                    res_data = f"State transitioned to {current_state}. Now follow {current_state} instructions."
+                                                elif tool_name == "lookup_patient":
+                                                    p = internal_lookup_patient(args.get("name", ""), args.get("dob", ""))
+                                                    res_data = json.dumps(p) if p else "Patient Not Found."
+                                                elif tool_name == "get_appointments":
+                                                    res_data = json.dumps(MOCK_APPOINTMENTS.get(args.get("patient_id"), ["No appointments found."]))
+                                                elif tool_name == "get_prescriptions":
+                                                    res_data = json.dumps(MOCK_PRESCRIPTIONS.get(args.get("patient_id"), ["No prescriptions found."]))
+                                                elif tool_name == "get_labs":
+                                                    res_data = json.dumps(MOCK_LABS.get(args.get("patient_id"), ["No labs found."]))
+                                                elif tool_name == "get_available_slots":
+                                                    res_data = json.dumps(MOCK_AVAILABLE_SLOTS)
+                                                    
+                                                messages.append({"role": "tool", "tool_call_id": tc["id"], "name": tool_name, "content": res_data})
+                                                
+                                            await process_llm() # Automatically follow-up!
 
                                     except asyncio.CancelledError:
                                         print("\n[LLM Task Cancelled by User Interrupt]")
