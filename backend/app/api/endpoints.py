@@ -1,3 +1,4 @@
+from difflib import SequenceMatcher
 from fastapi import APIRouter, HTTPException
 
 router = APIRouter()
@@ -75,7 +76,14 @@ async def get_available_slots():
     return MOCK_AVAILABLE_SLOTS
 
 def internal_lookup_patient(name: str, dob: str):
+    best_match = None
+    best_ratio = 0.0
     for pid, p in MOCK_PATIENTS.items():
-        if p["name"].lower() == name.lower() and p["dob"] == dob:
-            return p
-    return None
+        if p["dob"] != dob:
+            continue
+        ratio = SequenceMatcher(None, p["name"].lower(), name.lower()).ratio()
+        if ratio > best_ratio:
+            best_ratio = ratio
+            best_match = p
+    # 0.75 threshold: catches Sophia→Sofia, Aisha→Aysha but rejects unrelated names
+    return best_match if best_ratio >= 0.75 else None

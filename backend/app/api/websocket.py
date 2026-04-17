@@ -120,18 +120,115 @@ async def websocket_audio_endpoint(websocket: WebSocket):
                                 # Reset buffer
                                 accumulated_transcript = ""
                                 print(f"--- Triggering Brain (Groq) with: '{text_to_process}' ---")
-                                messages[0]["content"] = get_system_prompt()
                                 messages.append({"role": "user", "content": text_to_process})
                                 
                                 # Spawn async LLM process so we don't block STT parsing
                                 async def process_llm():
+                                    response_sent = False
+                                    tts_socket = None
+                                    tts_receive_task = None
+                                    full_response = ""
                                     try:
-                                        # --- ElevenLabs TTS Setup ---
-                                        tts_socket = None
-                                        tts_receive_task = None
+                                        from app.api.endpoints import (
+                                            internal_lookup_patient, MOCK_APPOINTMENTS, 
+                                            MOCK_PRESCRIPTIONS, MOCK_LABS, MOCK_AVAILABLE_SLOTS
+                                        )
+
+                                        # ---- PHASE 1: Non-streaming tool resolution loop ----
+                                        messages[0]["content"] = get_system_prompt()
+                                        max_tool_rounds = 5
+                                        import re
+                                        import uuid
+                                        for _ in range(max_tool_rounds):
+                                            print("\n[Phase 1] Calling LLM (non-streaming, with tools)...")
+                                            completion = await llm_client.chat.completions.create(
+                                                model="llama-3.1-8b-instant",
+                                                messages=messages,
+                                                tools=TOOLS,
+                                                tool_choice="auto"
+                                            )
+                                            choice = completion.choices[0]
+                                            
+                                            # If the model returned tool calls, execute them
+                                            extracted_tools = []
+                                            if choice.message.tool_calls:
+                                                for tc in choice.message.tool_calls:
+                                                    extracted_tools.append({"id": tc.id, "name": tc.function.name, "arguments": tc.function.arguments})
+                                            
+                                            content = choice.message.content or ""
+                                            clean_content = content
+                                            
+                                            # Regex to catch hallucinated pseudo-XML tools from llama
+                                            pattern1 = r'<([a-zA-Z_]+)>(\s*\{.*?\}\s*)</.*?>'
+                                            pattern2 = r'<function=([a-zA-Z_]+)>(\s*\{.*?\}\s*)</function.*?>'
+                                            
+                                            for match in re.finditer(pattern1, content):
+                                                clean_content = clean_content.replace(match.group(0), "")
+                                                extracted_tools.append({"id": f"call_{uuid.uuid4().hex[:8]}", "name": match.group(1), "arguments": match.group(2)})
+                                            for match in re.finditer(pattern2, content):
+                                                clean_content = clean_content.replace(match.group(0), "")
+                                                extracted_tools.append({"id": f"call_{uuid.uuid4().hex[:8]}", "name": match.group(1), "arguments": match.group(2)})
+                                            
+                                            if clean_content.strip():
+                                                full_response += clean_content.strip() + " "
+                                            
+                                            if extracted_tools:
+                                                # Append assistant message with tool calls
+                                                tcs_for_history = []
+                                                for tc in extracted_tools:
+                                                    tcs_for_history.append({"id": tc["id"], "type": "function", "function": {"name": tc["name"], "arguments": tc["arguments"]}})
+                                                    
+                                                assist_msg = {"role": "assistant"}
+                                                if clean_content.strip():
+                                                    assist_msg["content"] = clean_content.strip()
+                                                assist_msg["tool_calls"] = tcs_for_history
+                                                messages.append(assist_msg)
+                                                
+                                                for tc in extracted_tools:
+                                                    tool_name = tc["name"]
+                                                    try:
+                                                        args = json.loads(tc["arguments"])
+                                                    except:
+                                                        args = {}
+                                                    
+                                                    print(f"[TOOL EXECUTED]: {tool_name}({args})")
+                                                    res_data = "Unknown tool."
+                                                    
+                                                    if tool_name == "transition_state":
+                                                        nonlocal current_state
+                                                        current_state = args.get("new_state", current_state)
+                                                        messages[0]["content"] = get_system_prompt()
+                                                        res_data = f"State transitioned to {current_state}."
+                                                    elif tool_name == "lookup_patient":
+                                                        p = internal_lookup_patient(args.get("name", ""), args.get("dob", ""))
+                                                        res_data = json.dumps(p) if p else "Patient Not Found."
+                                                    elif tool_name == "get_appointments":
+                                                        res_data = json.dumps(MOCK_APPOINTMENTS.get(args.get("patient_id"), ["No appointments found."]))
+                                                    elif tool_name == "get_prescriptions":
+                                                        res_data = json.dumps(MOCK_PRESCRIPTIONS.get(args.get("patient_id"), ["No prescriptions found."]))
+                                                    elif tool_name == "get_labs":
+                                                        res_data = json.dumps(MOCK_LABS.get(args.get("patient_id"), ["No labs found."]))
+                                                    elif tool_name == "get_available_slots":
+                                                        res_data = json.dumps(MOCK_AVAILABLE_SLOTS)
+                                                        
+                                                    messages.append({"role": "tool", "tool_call_id": tc["id"], "name": tool_name, "content": res_data})
+                                                
+                                                # Loop back to let the model process tool results
+                                                continue
+                                            else:
+                                                # No tool calls — model is done
+                                                if clean_content.strip():
+                                                    messages.append({"role": "assistant", "content": clean_content.strip()})
+                                                break
+
+                                        if not full_response.strip():
+                                            print("[Phase 1] No final text response from LLM.")
+                                            return
+
+                                        print(f"\nBot: {full_response}\n")
+
+                                        # ---- PHASE 2: Stream final response to TTS ----
                                         api_key = getattr(settings, "elevenlabs_api_key", None)
-                                        print(f"ElevenLabs Key Present: {bool(api_key)}")
-                                        
                                         if api_key:
                                             try:
                                                 voice_id = "pNInz6obpgDQGcFmaJgB" 
@@ -157,7 +254,6 @@ async def websocket_audio_endpoint(websocket: WebSocket):
                                                         while True:
                                                             msg = await tts_socket.recv()
                                                             data = json.loads(msg)
-                                                            keys = list(data.keys())
                                                             
                                                             if "error" in data:
                                                                 print(f"ElevenLabs API Error: {data['error']}")
@@ -175,109 +271,31 @@ async def websocket_audio_endpoint(websocket: WebSocket):
                                                         print(f"\nTTS Receive error: {e}")
 
                                                 tts_receive_task = asyncio.create_task(receive_audio())
-                                            except Exception as e:
-                                                print(f"Failed to connect to ElevenLabs: {e}")
-                                            
-                                        # --- LLM Stream ---
-                                        print("\nBot: ", end="")
-                                        stream = await llm_client.chat.completions.create(
-                                            model="llama-3.1-8b-instant",
-                                            messages=messages,
-                                            stream=True,
-                                            tools=TOOLS,
-                                            tool_choice="auto"
-                                        )
-                                        full_response = ""
-                                        is_action = False
-                                        response_sent = False
-                                        
-                                        tool_calls_buffer = {}
-
-                                        async for chunk in stream:
-                                            delta = chunk.choices[0].delta
-                                            if delta.tool_calls:
-                                                is_action = True
-                                                for tc in delta.tool_calls:
-                                                    if tc.id:
-                                                        tool_calls_buffer[tc.index] = {"id": tc.id, "function": {"name": tc.function.name, "arguments": ""}}
-                                                    if tc.function.arguments:
-                                                        tool_calls_buffer[tc.index]["function"]["arguments"] += tc.function.arguments
-                                            
-                                            content = delta.content
-                                            if content:
-                                                print(content, end="", flush=True)
-                                                full_response += content
-                                                if tts_socket:
-                                                    await tts_socket.send(json.dumps({"text": content, "try_trigger_generation": True}))
-
-                                        print("\n")
-                                        if full_response.strip():
-                                            messages.append({"role": "assistant", "content": full_response})
-                                        
-                                        if not is_action and full_response.strip():
-                                            await websocket.send_text(json.dumps({
-                                                "type": "bot_response",
-                                                "text": full_response
-                                            }))
-                                            response_sent = True
-                                        
-                                        if tts_socket:
-                                            if not is_action:
+                                                
+                                                # Send the full response text to TTS
+                                                await tts_socket.send(json.dumps({"text": full_response, "try_trigger_generation": True}))
                                                 await tts_socket.send(json.dumps({"text": ""}))
+                                                
                                                 try:
-                                                    await asyncio.wait_for(tts_receive_task, timeout=5.0)
+                                                    await asyncio.wait_for(tts_receive_task, timeout=10.0)
                                                 except asyncio.TimeoutError:
                                                     pass
-                                            await tts_socket.close()
+                                                await tts_socket.close()
+                                                tts_socket = None
+                                            except Exception as e:
+                                                print(f"Failed to connect to ElevenLabs: {e}")
 
-                                        # ---- NATIVE TOOL EXECUTIONS ----
-                                        if is_action:
-                                            from app.api.endpoints import (
-                                                internal_lookup_patient, MOCK_APPOINTMENTS, 
-                                                MOCK_PRESCRIPTIONS, MOCK_LABS, MOCK_AVAILABLE_SLOTS
-                                            )
-                                            # Append tool calls to message history
-                                            tcs = []
-                                            for idx, tc in tool_calls_buffer.items():
-                                                tcs.append({"id": tc["id"], "type": "function", "function": {"name": tc["function"]["name"], "arguments": tc["function"]["arguments"]}})
-                                            
-                                            messages.append({"role": "assistant", "tool_calls": tcs})
-                                            
-                                            for idx, tc in tool_calls_buffer.items():
-                                                tool_name = tc["function"]["name"]
-                                                try:
-                                                    args = json.loads(tc["function"]["arguments"])
-                                                except:
-                                                    args = {}
-                                                
-                                                print(f"[TOOL EXECUTED]: {tool_name} with {args}")
-                                                res_data = "Unknown Tool"
-                                                
-                                                if tool_name == "transition_state":
-                                                    nonlocal current_state
-                                                    current_state = args.get("new_state", current_state)
-                                                    res_data = f"State transitioned to {current_state}. Now follow {current_state} instructions."
-                                                elif tool_name == "lookup_patient":
-                                                    p = internal_lookup_patient(args.get("name", ""), args.get("dob", ""))
-                                                    res_data = json.dumps(p) if p else "Patient Not Found."
-                                                elif tool_name == "get_appointments":
-                                                    res_data = json.dumps(MOCK_APPOINTMENTS.get(args.get("patient_id"), ["No appointments found."]))
-                                                elif tool_name == "get_prescriptions":
-                                                    res_data = json.dumps(MOCK_PRESCRIPTIONS.get(args.get("patient_id"), ["No prescriptions found."]))
-                                                elif tool_name == "get_labs":
-                                                    res_data = json.dumps(MOCK_LABS.get(args.get("patient_id"), ["No labs found."]))
-                                                elif tool_name == "get_available_slots":
-                                                    res_data = json.dumps(MOCK_AVAILABLE_SLOTS)
-                                                    
-                                                messages.append({"role": "tool", "tool_call_id": tc["id"], "name": tool_name, "content": res_data})
-                                                
-                                            await process_llm() # Automatically follow-up!
+                                        # Send text to frontend
+                                        await websocket.send_text(json.dumps({
+                                            "type": "bot_response",
+                                            "text": full_response
+                                        }))
+                                        response_sent = True
 
                                     except asyncio.CancelledError:
                                         print("\n[LLM Task Cancelled by User Interrupt]")
                                         
-                                        # Send whatever text the bot generated (only if not already sent)
-                                        if not response_sent and 'full_response' in locals() and full_response.strip():
+                                        if not response_sent and full_response.strip():
                                             messages.append({"role": "assistant", "content": full_response})
                                             asyncio.create_task(websocket.send_text(json.dumps({
                                                 "type": "bot_response",
@@ -285,7 +303,7 @@ async def websocket_audio_endpoint(websocket: WebSocket):
                                             })))
                                                 
                                         try:
-                                            if 'tts_socket' in locals() and tts_socket:
+                                            if tts_socket:
                                                 asyncio.create_task(tts_socket.close())
                                         except Exception:
                                             pass
@@ -294,7 +312,7 @@ async def websocket_audio_endpoint(websocket: WebSocket):
                                         print(f"[LLM Error]: {e}")
                                         error_str = str(e).lower()
                                         if "429" in error_str or "rate limit" in error_str:
-                                            err_msg = "I'm currently receiving too many requests. Please try again in an hour."
+                                            err_msg = "I'm currently receiving too many requests. Please try again in a moment."
                                         else:
                                             err_msg = "I'm sorry, I'm having trouble processing that right now."
                                             
@@ -303,10 +321,6 @@ async def websocket_audio_endpoint(websocket: WebSocket):
                                                 "type": "bot_response",
                                                 "text": err_msg
                                             }))
-                                            if 'tts_socket' in locals() and tts_socket:
-                                                await tts_socket.send(json.dumps({"text": err_msg, "try_trigger_generation": True}))
-                                                await tts_socket.send(json.dumps({"text": ""}))
-                                                await tts_socket.close()
                                         except Exception:
                                             pass
                                         
