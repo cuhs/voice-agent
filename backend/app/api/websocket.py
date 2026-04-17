@@ -45,11 +45,12 @@ async def websocket_audio_endpoint(websocket: WebSocket):
         "Rules: "
         "1. Keep responses concise (voice responses should be 1-3 sentences). "
         "2. Be warm and reassuring. "
-        "3. Do not use markdown formatting. "
-        "4. Always verify the patient's identity before sharing medical details (ask for name and date of birth format YYYY-MM-DD). "
-        "5. Never provide medical diagnoses or treatment advice — always direct clinical questions to a provider.\n"
-        "6. You are a patient coordination assistant, not a medical professional. "
-        "7. If the user asks something completely unrelated to medical assistance, ignore it.\n"
+        "3. You are a VOICE agent. So don't say stuff as if you are a text chat bot"
+        "4. Do not use markdown formatting. "
+        "5. Always verify the patient's identity before sharing medical details (ask for name and date of birth format YYYY-MM-DD). "
+        "6. Never provide medical diagnoses or treatment advice — always direct clinical questions to a provider.\n"
+        "7. You are a patient coordination assistant, not a medical professional. "
+        "8. If the user asks something completely unrelated to medical assistance, ignore it.\n"
         "\nAVAILABLE INTERNAL TOOLS (NEVER ask the user to say these. YOU must generate these exact strings yourself to fetch data):\n"
         "- To look up a patient ID, respond EXACTLY with: `LOOKUP_PATIENT: Name, YYYY-MM-DD`\n"
         "- To get appointments, respond EXACTLY with: `GET_APPOINTMENTS: patient_id`\n"
@@ -289,6 +290,23 @@ async def websocket_audio_endpoint(websocket: WebSocket):
                                         raise
                                     except Exception as e:
                                         print(f"[LLM Error]: {e}")
+                                        error_str = str(e).lower()
+                                        if "429" in error_str or "rate limit" in error_str:
+                                            err_msg = "I'm currently receiving too many requests. Please try again in an hour."
+                                        else:
+                                            err_msg = "I'm sorry, I'm having trouble processing that right now."
+                                            
+                                        try:
+                                            await websocket.send_text(json.dumps({
+                                                "type": "bot_response",
+                                                "text": err_msg
+                                            }))
+                                            if 'tts_socket' in locals() and tts_socket:
+                                                await tts_socket.send(json.dumps({"text": err_msg, "try_trigger_generation": True}))
+                                                await tts_socket.send(json.dumps({"text": ""}))
+                                                await tts_socket.close()
+                                        except Exception:
+                                            pass
                                         
                                 nonlocal current_llm_task
                                 if current_llm_task and not current_llm_task.done():
@@ -302,24 +320,17 @@ async def websocket_audio_endpoint(websocket: WebSocket):
                             if not alternatives:
                                 continue
                                 
-                            transcript = alternatives[0].get("transcript", "").strip()
-                            
+                            is_final = res.get("is_final", False)
+                            transcript = res.get("channel", {}).get("alternatives", [{}])[0].get("transcript", "")
                             if transcript:
                                 if is_final:
-                                    # Accumulate into our buffer
-                                    accumulated_transcript += transcript + " "
                                     print(f">>> [FINAL]: {transcript}")
+                                    accumulated_transcript += transcript + " "
+                                    await websocket.send_text(json.dumps({"type": "transcript", "is_final": True, "text": transcript}))
                                 else:
                                     print(f"    [Interim]: {transcript}")
-                                
-                                await websocket.send_text(json.dumps({
-                                    "type": "transcript",
-                                    "text": transcript,
-                                    "is_final": is_final
-                                }))
-
-                except websockets.exceptions.ConnectionClosed:
-                    print("Deepgram connection closed.")
+                                    await websocket.send_text(json.dumps({"type": "transcript", "is_final": False, "text": transcript}))
+                                    
                 except Exception as e:
                     print(f"Sender error: {e}")
 
@@ -337,6 +348,8 @@ async def websocket_audio_endpoint(websocket: WebSocket):
                 keep_alive()
             )
 
+    except WebSocketDisconnect:
+        print("WebSocket client disconnected normally")
     except Exception as e:
         print(f"Failed to connect or maintain Deepgram via WebSockets: {e}")
     finally:

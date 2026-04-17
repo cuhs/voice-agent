@@ -28,6 +28,8 @@ export default function Home() {
   const micAnalyserRef = useRef<AnalyserNode | null>(null);
   const botAnalyserRef = useRef<AnalyserNode | null>(null);
   const animationFrameRef = useRef<number>(0);
+  const reconnectAttemptsRef = useRef(0);
+  const reconnectTimeoutRef = useRef<NodeJS.Timeout | null>(null);
 
   const scrollToBottom = () => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -51,11 +53,17 @@ export default function Home() {
   }, [isRecording]);
 
   const connectWebSocket = () => {
+    if (reconnectTimeoutRef.current) {
+      clearTimeout(reconnectTimeoutRef.current);
+      reconnectTimeoutRef.current = null;
+    }
+
     const ws = new WebSocket("ws://127.0.0.1:8000/api/v1/ws/audio");
     wsRef.current = ws;
 
     ws.onopen = () => {
       setStatus("connected");
+      reconnectAttemptsRef.current = 0; // Reset backoff on success
     };
 
     ws.onmessage = async (event) => {
@@ -128,12 +136,29 @@ export default function Home() {
     };
 
     ws.onclose = () => {
-      setStatus("disconnected");
+      // Only reconnect if this isn't an intentional stop (wsRef.current would be null or different)
+      if (wsRef.current === ws) {
+        setStatus("reconnecting");
+        const backoffTime = Math.min(1000 * Math.pow(2, reconnectAttemptsRef.current), 10000);
+        console.log(`WebSocket dropped. Reconnecting in ${backoffTime}ms...`);
+        reconnectAttemptsRef.current += 1;
+        
+        reconnectTimeoutRef.current = setTimeout(() => {
+          if (wsRef.current === ws) { // still waiting to reconnect this specific socket
+            connectWebSocket();
+          }
+        }, backoffTime);
+      } else {
+        setStatus("disconnected");
+      }
     };
 
     ws.onerror = (err) => {
       console.error("WebSocket error:", err);
-      setStatus("error");
+      // onclose will handle the reconnection logic
+      if (wsRef.current === ws) {
+        setStatus("error");
+      }
     };
   };
 
@@ -320,8 +345,14 @@ export default function Home() {
     }
 
     if (wsRef.current) {
+      wsRef.current.onclose = null; // Prevent reconnect loop
       wsRef.current.close();
       wsRef.current = null;
+    }
+
+    if (reconnectTimeoutRef.current) {
+      clearTimeout(reconnectTimeoutRef.current);
+      reconnectTimeoutRef.current = null;
     }
 
     setIsRecording(false);
@@ -345,7 +376,7 @@ export default function Home() {
         </div>
         <div style={styles.controlPanel}>
           <div style={styles.statusIndicator}>
-            <div style={{ ...styles.dot, backgroundColor: status === "listening" ? "#4ade80" : status === "connected" ? "#fbbf24" : "#f87171" }}></div>
+            <div style={{ ...styles.dot, backgroundColor: status === "listening" ? "#4ade80" : status === "connected" ? "#fbbf24" : status === "reconnecting" ? "#f97316" : "#f87171" }}></div>
             <span style={styles.statusText}>{status.toUpperCase()}</span>
           </div>
           <button onClick={handleToggle} style={isRecording ? styles.stopButton : styles.startButton}>
