@@ -29,9 +29,10 @@ EMERGENCY_RESPONSE = (
     "If you are experiencing an emergency, please hang up and call 911 immediately."
 )
 
-CLINICAL_RESPONSE = (
-    "I'm not able to provide medical advice. I can help you schedule an appointment "
-    "with your provider to discuss this. Would you like me to look up available times?"
+CLINICAL_INJECTION = (
+    "The patient is asking a clinical question. You are NOT a medical professional. "
+    "Respond with empathy, do not provide diagnosis or treatment advice, and "
+    "direct them to contact their provider."
 )
 
 HALLUCINATION_FALLBACK = (
@@ -41,18 +42,26 @@ HALLUCINATION_FALLBACK = (
 )
 
 
-def classify_safety(text: str) -> str | None:
+def classify_safety(text: str) -> tuple[str | None, str | None]:
     """
     Check user input for emergency or clinical keywords.
 
-    Returns a canned safe response string if intercepted, or None to proceed normally.
+    Returns (emergency_response, clinical_prompt_injection).
+    If emergency_response is set, the LLM should be skipped.
+    If clinical_prompt_injection is set, it should be appended to the system prompt.
     """
     text_lower = text.lower()
     if any(kw in text_lower for kw in EMERGENCY_KEYWORDS):
-        return EMERGENCY_RESPONSE
+        return EMERGENCY_RESPONSE, None
+    
+    # Medication interaction questions
+    if "can i take" in text_lower and "with" in text_lower or "interaction between" in text_lower:
+        return "For questions about medication interactions, please speak directly with your pharmacist or provider.", None
+
     if any(kw in text_lower for kw in CLINICAL_KEYWORDS):
-        return CLINICAL_RESPONSE
-    return None
+        return None, CLINICAL_INJECTION
+        
+    return None, None
 
 
 def validate_response(full_response: str, tool_results: dict[str, str]) -> str | None:
