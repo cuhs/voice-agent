@@ -81,13 +81,15 @@ async def run_orchestration(
         (final_response, updated_state, updated_patient_id)
     """
     # ── Pre-LLM safety check ─────────────────────────────────────────────
-    safety_response = classify_safety(user_text)
+    safety_response, safety_injection = classify_safety(user_text)
     if safety_response:
         messages.append({"role": "assistant", "content": safety_response})
         return safety_response, current_state, verified_patient_id
 
     # ── Update system prompt for current state ───────────────────────────
     messages[0]["content"] = get_system_prompt(current_state, verified_patient_id)
+    if safety_injection:
+        messages[0]["content"] += "\n\n" + safety_injection
 
     full_response = ""
     last_tool_results: dict[str, str] = {}
@@ -96,7 +98,7 @@ async def run_orchestration(
         print(f"\n[Phase 1] Calling LLM (state={current_state}, with tools)...")
 
         # Dynamic temperature: warmer for chat states, colder for data states
-        temp = 0.4 if current_state in ("GREETING", "CLOSING") else 0.1
+        temp = 0.4 if current_state in ("GREETING", "CLOSING") else 0.0
 
         extracted_tools: list[dict] = []
         content = ""
@@ -186,8 +188,13 @@ async def run_orchestration(
                 if "current_state" in state_updates:
                     current_state = state_updates["current_state"]
                     messages[0]["content"] = get_system_prompt(current_state, verified_patient_id)
+                    if safety_injection:
+                        messages[0]["content"] += "\n\n" + safety_injection
                 if "verified_patient_id" in state_updates:
                     verified_patient_id = state_updates["verified_patient_id"]
+                    messages[0]["content"] = get_system_prompt(current_state, verified_patient_id)
+                    if safety_injection:
+                        messages[0]["content"] += "\n\n" + safety_injection
 
                 last_tool_results[tool_name] = result
                 messages.append({
@@ -196,6 +203,11 @@ async def run_orchestration(
                     "name": tool_name,
                     "content": result,
                 })
+
+                if "template_response" in state_updates:
+                    full_response = state_updates["template_response"]
+                    messages.append({"role": "assistant", "content": full_response})
+                    return full_response, current_state, verified_patient_id
 
             continue  # Loop back for next LLM round
         else:

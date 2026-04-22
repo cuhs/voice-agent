@@ -57,13 +57,43 @@ def execute_tool(tool_name: str, args: dict, verified_patient_id: str | None) ->
                 result = "Patient Not Found."
 
     elif tool_name == "get_appointments":
-        result = json.dumps(MOCK_APPOINTMENTS.get(args.get("patient_id"), ["No appointments found."]))
+        data = MOCK_APPOINTMENTS.get(args.get("patient_id"), [])
+        result = json.dumps(data)
+        if not data:
+            state_updates["template_response"] = "You don't have any upcoming appointments. Would you like to schedule one?"
+        else:
+            next_apt = data[0]
+            state_updates["template_response"] = (
+                f"I can see you have {len(data)} upcoming appointment(s). The next one is on "
+                f"{next_apt['date']} at {next_apt['time']} with {next_apt['provider']} in "
+                f"{next_apt['department']}. Would you like to hear about the others, or is there anything you'd like to change?"
+            )
 
     elif tool_name == "get_prescriptions":
-        result = json.dumps(MOCK_PRESCRIPTIONS.get(args.get("patient_id"), ["No prescriptions found."]))
+        data = MOCK_PRESCRIPTIONS.get(args.get("patient_id"), [])
+        result = json.dumps(data)
+        if not data:
+            state_updates["template_response"] = "You don't have any active prescriptions. Is there anything else I can help with?"
+        else:
+            rx_details = ", and ".join([f"{rx['medication']} {rx['dosage']} with {rx['refills_remaining']} refills remaining" for rx in data])
+            state_updates["template_response"] = (
+                f"You have {len(data)} active prescription(s): {rx_details}. "
+                "Would you like to request a refill for any of these?"
+            )
 
     elif tool_name == "get_labs":
-        result = json.dumps(MOCK_LABS.get(args.get("patient_id"), ["No labs found."]))
+        data = MOCK_LABS.get(args.get("patient_id"), [])
+        result = json.dumps(data)
+        if not data:
+            state_updates["template_response"] = "I couldn't find any recent lab results. Would you like to schedule a follow-up with your provider?"
+        else:
+            lab = data[0]
+            ref_range = lab.get("reference_range", "unknown")
+            state_updates["template_response"] = (
+                f"Your most recent {lab['test']} from {lab['date']} showed a result of {lab['result']}. "
+                f"The reference range is {ref_range}, and the status is {lab['status']}. "
+                "Would you like me to help you schedule a follow-up?"
+            )
 
     elif tool_name == "get_available_slots":
         result = json.dumps(MOCK_AVAILABLE_SLOTS)
