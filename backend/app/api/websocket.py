@@ -50,7 +50,7 @@ async def websocket_audio_endpoint(websocket: WebSocket):
             f"\nCURRENT CONVERSATION STATE: {current_state}\n"
         )
         if current_state == "GREETING":
-            return base + "Goal: Greet the patient warmly. If they have a request, use transition_state to move to VERIFICATION."
+            return base + "Goal: Greet the patient warmly and ask how you can help today. Do NOT call any tools yet. Only use transition_state to move to VERIFICATION once the patient has stated a specific need (e.g. appointments, prescriptions, lab results)."
         elif current_state == "VERIFICATION":
             return base + "Goal: Ask their name and DOB. Once provided, use lookup_patient. If successful, use transition_state to move to AUTHENTICATED."
         elif current_state == "AUTHENTICATED":
@@ -67,7 +67,7 @@ async def websocket_audio_endpoint(websocket: WebSocket):
 
     TOOLS = [
         {"type": "function", "function": {"name": "transition_state", "description": "Move the conversation to a new state.", "parameters": {"type": "object", "properties": {"new_state": {"type": "string", "enum": ["GREETING", "VERIFICATION", "AUTHENTICATED", "SERVICING", "SCHEDULING", "CLOSING"]}}, "required": ["new_state"]}}},
-        {"type": "function", "function": {"name": "lookup_patient", "description": "Look up patient by name and DOB.", "parameters": {"type": "object", "properties": {"name": {"type": "string"}, "dob": {"type": "string", "description": "YYYY-MM-DD"}}, "required": ["name", "dob"]}}},
+        {"type": "function", "function": {"name": "lookup_patient", "description": "Look up patient by name and DOB. Both name and dob are needed. If the patient has not provided their date of birth yet, do NOT call this tool — ask them for it first.", "parameters": {"type": "object", "properties": {"name": {"type": "string"}, "dob": {"type": "string", "description": "Date of birth in YYYY-MM-DD format"}}, "required": ["name"]}}},
         {"type": "function", "function": {"name": "get_appointments", "description": "Get appointments for a patient.", "parameters": {"type": "object", "properties": {"patient_id": {"type": "string"}}, "required": ["patient_id"]}}},
         {"type": "function", "function": {"name": "get_prescriptions", "description": "Get prescriptions for a patient.", "parameters": {"type": "object", "properties": {"patient_id": {"type": "string"}}, "required": ["patient_id"]}}},
         {"type": "function", "function": {"name": "get_labs", "description": "Get lab results for a patient.", "parameters": {"type": "object", "properties": {"patient_id": {"type": "string"}}, "required": ["patient_id"]}}},
@@ -139,38 +139,78 @@ async def websocket_audio_endpoint(websocket: WebSocket):
                                         max_tool_rounds = 5
                                         import re
                                         import uuid
+                                        def fix_malformed_json(raw: str) -> str:
+                                            """Fix unquoted JSON keys/values like {new_state: VERIFICATION}."""
+                                            # Quote unquoted keys: word before colon
+                                            fixed = re.sub(r'(?<=[{,])\s*(\w+)\s*:', r' "\1":', raw)
+                                            # Quote unquoted string values: word after colon (not already quoted)
+                                            fixed = re.sub(r':\s*(?!")([A-Za-z_][A-Za-z_0-9]*)\s*(?=[,}])', r': "\1"', fixed)
+                                            return fixed
+
+                                        # Regex to catch hallucinated pseudo-XML tools from llama
+                                        pattern1 = r'<([a-zA-Z_]+)>(\s*\{.*?\}\s*)</.*?>'
+                                        pattern2 = r'<function=([a-zA-Z_]+)>(\s*\{.*?\}\s*)</function.*?>'
+
                                         for _ in range(max_tool_rounds):
                                             print("\n[Phase 1] Calling LLM (non-streaming, with tools)...")
-                                            completion = await llm_client.chat.completions.create(
-                                                model="llama-3.1-8b-instant",
-                                                messages=messages,
-                                                tools=TOOLS,
-                                                tool_choice="auto"
-                                            )
-                                            choice = completion.choices[0]
-                                            
-                                            # If the model returned tool calls, execute them
                                             extracted_tools = []
-                                            if choice.message.tool_calls:
-                                                for tc in choice.message.tool_calls:
-                                                    extracted_tools.append({"id": tc.id, "name": tc.function.name, "arguments": tc.function.arguments})
-                                            
-                                            content = choice.message.content or ""
-                                            clean_content = content
-                                            
-                                            # Regex to catch hallucinated pseudo-XML tools from llama
-                                            pattern1 = r'<([a-zA-Z_]+)>(\s*\{.*?\}\s*)</.*?>'
-                                            pattern2 = r'<function=([a-zA-Z_]+)>(\s*\{.*?\}\s*)</function.*?>'
-                                            
+                                            content = ""
+                                            clean_content = ""
+
+                                            try:
+                                                completion = await llm_client.chat.completions.create(
+                                                    model="llama-3.1-8b-instant",
+                                                    messages=messages,
+                                                    tools=TOOLS,
+                                                    tool_choice="auto"
+                                                )
+                                                choice = completion.choices[0]
+
+                                                if choice.message.tool_calls:
+                                                    for tc in choice.message.tool_calls:
+                                                        extracted_tools.append({"id": tc.id, "name": tc.function.name, "arguments": tc.function.arguments})
+
+                                                content = choice.message.content or ""
+                                                clean_content = content
+                                            except Exception as api_err:
+                                                # Try multiple ways to detect tool_use_failed from Groq
+                                                error_body = getattr(api_err, 'body', None)
+                                                failed_gen = None
+
+                                                if isinstance(error_body, dict):
+                                                    # Nested: {"error": {"code": "tool_use_failed", ...}}
+                                                    inner = error_body.get('error', error_body)
+                                                    if inner.get('code') == 'tool_use_failed':
+                                                        failed_gen = inner.get('failed_generation', '')
+
+                                                # Fallback: parse from string representation
+                                                if failed_gen is None:
+                                                    err_str = str(api_err)
+                                                    if 'tool_use_failed' in err_str:
+                                                        fg_match = re.search(r"'failed_generation':\s*'(.*?)'(?:\s*})", err_str, re.DOTALL)
+                                                        if fg_match:
+                                                            failed_gen = fg_match.group(1)
+                                                        else:
+                                                            failed_gen = ''
+
+                                                if failed_gen is not None:
+                                                    print(f"[Recovering from tool_use_failed]: parsing failed generation")
+                                                    content = failed_gen
+                                                    clean_content = content
+                                                else:
+                                                    raise
+
                                             for match in re.finditer(pattern1, content):
                                                 clean_content = clean_content.replace(match.group(0), "")
-                                                extracted_tools.append({"id": f"call_{uuid.uuid4().hex[:8]}", "name": match.group(1), "arguments": match.group(2)})
+                                                fixed_args = fix_malformed_json(match.group(2))
+                                                extracted_tools.append({"id": f"call_{uuid.uuid4().hex[:8]}", "name": match.group(1), "arguments": fixed_args})
                                             for match in re.finditer(pattern2, content):
                                                 clean_content = clean_content.replace(match.group(0), "")
-                                                extracted_tools.append({"id": f"call_{uuid.uuid4().hex[:8]}", "name": match.group(1), "arguments": match.group(2)})
+                                                fixed_args = fix_malformed_json(match.group(2))
+                                                extracted_tools.append({"id": f"call_{uuid.uuid4().hex[:8]}", "name": match.group(1), "arguments": fixed_args})
                                             
                                             if clean_content.strip():
-                                                full_response += clean_content.strip() + " "
+                                                full_response = clean_content.strip() + " "
                                             
                                             if extracted_tools:
                                                 # Append assistant message with tool calls
@@ -200,8 +240,11 @@ async def websocket_audio_endpoint(websocket: WebSocket):
                                                         messages[0]["content"] = get_system_prompt()
                                                         res_data = f"State transitioned to {current_state}."
                                                     elif tool_name == "lookup_patient":
-                                                        p = internal_lookup_patient(args.get("name", ""), args.get("dob", ""))
-                                                        res_data = json.dumps(p) if p else "Patient Not Found."
+                                                        if not args.get("dob"):
+                                                            res_data = "DOB not provided. You must ask the patient for their date of birth before looking them up."
+                                                        else:
+                                                            p = internal_lookup_patient(args.get("name", ""), args.get("dob", ""))
+                                                            res_data = json.dumps(p) if p else "Patient Not Found."
                                                     elif tool_name == "get_appointments":
                                                         res_data = json.dumps(MOCK_APPOINTMENTS.get(args.get("patient_id"), ["No appointments found."]))
                                                     elif tool_name == "get_prescriptions":
@@ -226,6 +269,13 @@ async def websocket_audio_endpoint(websocket: WebSocket):
                                             return
 
                                         print(f"\nBot: {full_response}\n")
+
+                                        # Send text to frontend FIRST (clears ignoreAudio flag before audio arrives)
+                                        await websocket.send_text(json.dumps({
+                                            "type": "bot_response",
+                                            "text": full_response
+                                        }))
+                                        response_sent = True
 
                                         # ---- PHASE 2: Stream final response to TTS ----
                                         api_key = getattr(settings, "elevenlabs_api_key", None)
@@ -284,13 +334,6 @@ async def websocket_audio_endpoint(websocket: WebSocket):
                                                 tts_socket = None
                                             except Exception as e:
                                                 print(f"Failed to connect to ElevenLabs: {e}")
-
-                                        # Send text to frontend
-                                        await websocket.send_text(json.dumps({
-                                            "type": "bot_response",
-                                            "text": full_response
-                                        }))
-                                        response_sent = True
 
                                     except asyncio.CancelledError:
                                         print("\n[LLM Task Cancelled by User Interrupt]")

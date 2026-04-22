@@ -30,6 +30,7 @@ export default function Home() {
   const animationFrameRef = useRef<number>(0);
   const reconnectAttemptsRef = useRef(0);
   const reconnectTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+  const ignoreAudioRef = useRef(false);
 
   const scrollToBottom = () => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -68,6 +69,8 @@ export default function Home() {
 
     ws.onmessage = async (event) => {
       if (event.data instanceof Blob) {
+        // Drop audio chunks that arrive after user interrupted
+        if (ignoreAudioRef.current) return;
         setIsBotSpeaking(true);
         const arrayBuffer = await event.data.arrayBuffer();
 
@@ -127,7 +130,10 @@ export default function Home() {
               setInterimTranscript(msg.text);
             }
           } else if (msg.type === "bot_response") {
+            ignoreAudioRef.current = false; // Accept audio for new response
             setChatHistory(prev => [...prev, { role: "bot", text: msg.text }]);
+          } else if (msg.type === "interrupt_ack") {
+            // Backend confirmed interrupt, already ignoring audio
           }
         } catch (e) {
           console.error("Failed to parse websocket message", e);
@@ -250,6 +256,9 @@ export default function Home() {
         minSpeechMs: 100,
         onSpeechStart: () => {
           console.log("VAD: Speech Start");
+          // Always tell the backend to cancel — it may be mid-LLM with no audio yet
+          ignoreAudioRef.current = true;
+
           if (scheduledSourcesRef.current.length > 0) {
             console.log("Interrupting bot playback...");
             scheduledSourcesRef.current.forEach((s) => {
@@ -259,10 +268,10 @@ export default function Home() {
             scheduledSourcesRef.current = [];
             nextStartTimeRef.current = 0;
             setIsBotSpeaking(false);
+          }
 
-            if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
-              wsRef.current.send(JSON.stringify({ type: "interrupt" }));
-            }
+          if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+            wsRef.current.send(JSON.stringify({ type: "interrupt" }));
           }
         },
         onSpeechEnd: (audio: Float32Array) => {
