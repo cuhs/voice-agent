@@ -51,6 +51,9 @@ def execute_tool(tool_name: str, args: dict, verified_patient_id: str | None) ->
             patient = internal_lookup_patient(args.get("name", ""), args.get("dob", ""))
             if patient:
                 state_updates["verified_patient_id"] = patient["id"]
+                # Auto-transition to AUTHENTICATED so the LLM doesn't need
+                # to remember a separate transition_state call.
+                state_updates["current_state"] = "AUTHENTICATED"
                 result = json.dumps(patient)
                 print(f"[SESSION]: verified_patient_id = {patient['id']}")
             else:

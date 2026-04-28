@@ -126,6 +126,8 @@ async def websocket_audio_endpoint(websocket: WebSocket):
     messages = [{"role": "system", "content": get_system_prompt(current_state, verified_patient_id)}]
     accumulated_transcript = ""
     current_llm_task = None
+    # Event the receiver sets to signal the orchestrator to abort early
+    cancel_event = asyncio.Event()
 
     try:
         ssl_context = ssl.create_default_context(cafile=certifi.where())
@@ -147,6 +149,8 @@ async def websocket_audio_endpoint(websocket: WebSocket):
                                 msg = json.loads(data["text"])
                                 if msg.get("type") == "interrupt":
                                     print("\n--- Frontend sent interrupt. Cancelling processing. ---")
+                                    # Signal the orchestrator to stop between steps
+                                    cancel_event.set()
                                     if current_llm_task and not current_llm_task.done():
                                         current_llm_task.cancel()
                                     await websocket.send_text(json.dumps({"type": "interrupt_ack"}))
@@ -182,11 +186,42 @@ async def websocket_audio_endpoint(websocket: WebSocket):
                                     nonlocal current_state, verified_patient_id
                                     response_sent = False
                                     full_response = ""
+
+                                    # Reset cancel event for this new processing run
+                                    cancel_event.clear()
+
+                                    # Track the background filler TTS task so we can
+                                    # wait for it to finish before starting the real
+                                    # response TTS (avoids overlapping audio streams).
+                                    filler_tts_task: asyncio.Task | None = None
+
+                                    # ── Filler callback: fire-and-forget TTS ──────
+                                    async def send_filler(phrase: str) -> None:
+                                        """Kick off filler TTS in the background and
+                                        return immediately so tool execution runs in
+                                        parallel with the filler audio playback."""
+                                        nonlocal filler_tts_task
+                                        try:
+                                            # Send text to frontend chat panel right away
+                                            await websocket.send_text(json.dumps({
+                                                "type": "bot_response",
+                                                "text": phrase,
+                                                "is_filler": True,
+                                            }))
+                                            # Start TTS in background — do NOT await
+                                            filler_tts_task = asyncio.create_task(
+                                                stream_tts(phrase, websocket)
+                                            )
+                                        except Exception as e:
+                                            print(f"[Filler TTS Error]: {e}")
+
                                     try:
                                         full_response, current_state, verified_patient_id = (
                                             await run_orchestration(
                                                 messages, current_state,
                                                 verified_patient_id, text_to_process,
+                                                filler_callback=send_filler,
+                                                cancel_event=cancel_event,
                                             )
                                         )
 
@@ -194,6 +229,16 @@ async def websocket_audio_endpoint(websocket: WebSocket):
                                             return
 
                                         print(f"\nBot: {full_response}\n")
+
+                                        # Wait for filler TTS to finish before
+                                        # streaming the real response — prevents
+                                        # two audio streams overlapping.
+                                        if filler_tts_task and not filler_tts_task.done():
+                                            print("[Waiting for filler TTS to finish...]")
+                                            try:
+                                                await asyncio.wait_for(filler_tts_task, timeout=5.0)
+                                            except asyncio.TimeoutError:
+                                                print("[Filler TTS timed out, proceeding]")
 
                                         # Send text to frontend first
                                         await websocket.send_text(json.dumps({
@@ -207,6 +252,9 @@ async def websocket_audio_endpoint(websocket: WebSocket):
 
                                     except asyncio.CancelledError:
                                         print("\n[LLM Task Cancelled by User Interrupt]")
+                                        # Cancel any in-flight filler TTS too
+                                        if filler_tts_task and not filler_tts_task.done():
+                                            filler_tts_task.cancel()
                                         if not response_sent and full_response.strip():
                                             messages.append({"role": "assistant", "content": full_response})
                                             asyncio.create_task(websocket.send_text(json.dumps({

@@ -34,8 +34,10 @@ def get_system_prompt(current_state: str, verified_patient_id: str | None) -> st
             "Do NOT call any data tools yet. Use transition_state to VERIFICATION once they state a need."
         ),
         "VERIFICATION": (
-            "Goal: Verify identity. Ask for their full name and date of birth. "
-            "When they say it aloud, silently convert it to YYYY-MM-DD and call lookup_patient. "
+            "Goal: Verify identity. You need BOTH their full name and date of birth. "
+            "If they only provide one, ask for the other. "
+            "ONLY call lookup_patient once they have explicitly spoken BOTH pieces of information. "
+            "Silently convert their spoken date (e.g. 'march fifth') to YYYY-MM-DD for the tool. "
             "NEVER tell the user what format you need. If found, call transition_state to AUTHENTICATED."
         ),
         "AUTHENTICATED": (

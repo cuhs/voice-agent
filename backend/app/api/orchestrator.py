@@ -6,11 +6,16 @@ Responsibilities:
   - Hallucinated XML tag extraction and cleanup
   - Malformed JSON recovery from tool_use_failed errors
   - Dynamic temperature selection based on conversation state
+  - Filler phrase dispatch to mask tool-call latency
+  - Mid-execution interrupt support via cancel_event
 """
 
 import json
+import random
 import re
 import uuid
+from collections.abc import Callable, Coroutine
+from typing import Any
 
 from openai import AsyncOpenAI
 
@@ -32,6 +37,27 @@ _PATTERN_TAG   = r'<([a-zA-Z_]+)>(\s*\{.*?\}\s*)(?:</[^>]*>)?'
 _PATTERN_FUNC  = r'<function=([a-zA-Z_]+)>(\s*\{.*?\}\s*)(?:</function[^>]*>)?'
 
 MAX_TOOL_ROUNDS = 5
+
+# ── Filler phrases to mask tool-call latency ─────────────────────────────────
+
+FILLER_PHRASES = [
+    "Let me check on that.",
+    "One moment, please.",
+    "Looking that up for you.",
+    "Let me pull that up.",
+    "Just a moment.",
+    "Bear with me one second.",
+]
+
+# Tools that are purely state transitions — no data lookup, so no perceptible
+# latency.  We skip the filler for these so the bot doesn't say "Let me check
+# on that" before simply asking the next question.
+_SKIP_FILLER_TOOLS = {"transition_state"}
+
+
+def _next_filler() -> str:
+    """Pick a random filler phrase."""
+    return random.choice(FILLER_PHRASES)
 
 
 def _fix_malformed_json(raw: str) -> str:
@@ -62,11 +88,18 @@ def _extract_hallucinated_tools(content: str) -> tuple[str, list[dict]]:
     return clean, tools
 
 
+# Type alias for the filler callback the websocket layer provides.
+# Signature: async def send_filler(phrase: str) -> None
+FillerCallback = Callable[[str], Coroutine[Any, Any, None]]
+
+
 async def run_orchestration(
     messages: list[dict],
     current_state: str,
     verified_patient_id: str | None,
     user_text: str,
+    filler_callback: FillerCallback | None = None,
+    cancel_event: "asyncio.Event | None" = None,
 ) -> tuple[str, str, str | None]:
     """
     Run the full Phase 1 orchestration loop.
@@ -76,10 +109,24 @@ async def run_orchestration(
         current_state:       Current state machine state.
         verified_patient_id: Patient ID if verified, else None.
         user_text:           The user's transcribed utterance.
+        filler_callback:     Optional async callable — invoked with a filler
+                             phrase string when a data tool call is detected,
+                             before execution begins.  The websocket layer
+                             uses this to immediately stream filler audio to
+                             the frontend so the user hears continuous speech.
+        cancel_event:        Optional asyncio.Event — set by the websocket
+                             receiver when the user interrupts.  Checked
+                             between orchestration steps so we can bail early
+                             instead of running stale work.
 
     Returns:
         (final_response, updated_state, updated_patient_id)
     """
+    import asyncio  # local import to keep module-level light
+
+    def _is_cancelled() -> bool:
+        return cancel_event is not None and cancel_event.is_set()
+
     # ── Pre-LLM safety check ─────────────────────────────────────────────
     safety_response, safety_injection = classify_safety(user_text)
     if safety_response:
@@ -95,6 +142,11 @@ async def run_orchestration(
     last_tool_results: dict[str, str] = {}
 
     for _ in range(MAX_TOOL_ROUNDS):
+        # ── Check for interrupt before each LLM round ────────────────
+        if _is_cancelled():
+            print("[Orchestrator] Cancelled before LLM call.")
+            return "", current_state, verified_patient_id
+
         print(f"\n[Phase 1] Calling LLM (state={current_state}, with tools)...")
 
         # Dynamic temperature: warmer for chat states, colder for data states
@@ -174,6 +226,25 @@ async def run_orchestration(
             assist_msg["tool_calls"] = tcs_for_history
             messages.append(assist_msg)
 
+            # ── Filler phrase: send immediately for data tools ────────
+            # Only send filler when at least one tool is a "real" data
+            # lookup (not a simple state transition).
+            needs_filler = any(
+                tc["name"] not in _SKIP_FILLER_TOOLS for tc in extracted_tools
+            )
+            if needs_filler and filler_callback:
+                phrase = _next_filler()
+                print(f"[Filler] Sending: \"{phrase}\"")
+                try:
+                    await filler_callback(phrase)
+                except Exception as e:
+                    print(f"[Filler] Callback error (non-fatal): {e}")
+
+            # ── Check for interrupt after filler, before tool exec ───
+            if _is_cancelled():
+                print("[Orchestrator] Cancelled after filler, before tool exec.")
+                return "", current_state, verified_patient_id
+
             for tc in extracted_tools:
                 tool_name = tc["name"]
                 try:
@@ -208,6 +279,11 @@ async def run_orchestration(
                     full_response = state_updates["template_response"]
                     messages.append({"role": "assistant", "content": full_response})
                     return full_response, current_state, verified_patient_id
+
+            # ── Check for interrupt after tool exec, before next LLM ─
+            if _is_cancelled():
+                print("[Orchestrator] Cancelled after tool exec.")
+                return "", current_state, verified_patient_id
 
             continue  # Loop back for next LLM round
         else:
