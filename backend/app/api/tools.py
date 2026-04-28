@@ -62,6 +62,7 @@ def execute_tool(tool_name: str, args: dict, verified_patient_id: str | None) ->
     elif tool_name == "get_appointments":
         data = MOCK_APPOINTMENTS.get(args.get("patient_id"), [])
         result = json.dumps(data)
+        state_updates["current_state"] = "SERVICING"
         if not data:
             state_updates["template_response"] = "You don't have any upcoming appointments. Would you like to schedule one?"
         else:
@@ -75,6 +76,7 @@ def execute_tool(tool_name: str, args: dict, verified_patient_id: str | None) ->
     elif tool_name == "get_prescriptions":
         data = MOCK_PRESCRIPTIONS.get(args.get("patient_id"), [])
         result = json.dumps(data)
+        state_updates["current_state"] = "SERVICING"
         if not data:
             state_updates["template_response"] = "You don't have any active prescriptions. Is there anything else I can help with?"
         else:
@@ -87,6 +89,7 @@ def execute_tool(tool_name: str, args: dict, verified_patient_id: str | None) ->
     elif tool_name == "get_labs":
         data = MOCK_LABS.get(args.get("patient_id"), [])
         result = json.dumps(data)
+        state_updates["current_state"] = "SERVICING"
         if not data:
             state_updates["template_response"] = "I couldn't find any recent lab results. Would you like to schedule a follow-up with your provider?"
         else:
@@ -99,7 +102,28 @@ def execute_tool(tool_name: str, args: dict, verified_patient_id: str | None) ->
             )
 
     elif tool_name == "get_available_slots":
-        result = json.dumps(MOCK_AVAILABLE_SLOTS)
+        data = MOCK_AVAILABLE_SLOTS
+        result = json.dumps(data)
+        # Auto-transition to SCHEDULING so the LLM knows the user's
+        # next message is a slot selection, not a new data request.
+        state_updates["current_state"] = "SCHEDULING"
+        if not data:
+            state_updates["template_response"] = (
+                "I'm sorry, there are no available appointment slots right now. "
+                "Would you like me to help with something else?"
+            )
+        else:
+            slot_descriptions = []
+            for slot in data:
+                slot_descriptions.append(
+                    f"{slot['provider']} on {slot['date']} at {slot['time']} "
+                    f"in {slot['department']}"
+                )
+            slots_text = ", or ".join(slot_descriptions)
+            state_updates["template_response"] = (
+                f"I found {len(data)} available slots: {slots_text}. "
+                "Which one works best for you?"
+            )
 
     else:
         result = "Unknown tool."

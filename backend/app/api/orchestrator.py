@@ -19,7 +19,7 @@ from typing import Any
 
 from openai import AsyncOpenAI
 
-from app.api.prompts import TOOLS, get_system_prompt
+from app.api.prompts import TOOLS, get_system_prompt, get_tools_for_state
 from app.api.tools import execute_tool
 from app.api.guardrails import classify_safety, validate_response
 from app.core.config import settings
@@ -49,10 +49,18 @@ FILLER_PHRASES = [
     "Bear with me one second.",
 ]
 
-# Tools that are purely state transitions — no data lookup, so no perceptible
-# latency.  We skip the filler for these so the bot doesn't say "Let me check
-# on that" before simply asking the next question.
-_SKIP_FILLER_TOOLS = {"transition_state"}
+# Tools where filler is unnecessary or counterproductive.
+# - transition_state: instant, no data lookup
+# - Data tools (get_appointments, etc.): return template_response immediately,
+#   so filler would play right before the answer instead of masking latency.
+# Only lookup_patient benefits from filler (triggers a second LLM call).
+_SKIP_FILLER_TOOLS = {
+    "transition_state",
+    "get_appointments",
+    "get_prescriptions",
+    "get_labs",
+    "get_available_slots",
+}
 
 
 def _next_filler() -> str:
@@ -160,7 +168,7 @@ async def run_orchestration(
             completion = await llm_client.chat.completions.create(
                 model="llama-3.1-8b-instant",
                 messages=messages,
-                tools=TOOLS,
+                tools=get_tools_for_state(current_state),
                 tool_choice="auto",
                 temperature=temp,
             )
