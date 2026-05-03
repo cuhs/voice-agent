@@ -103,8 +103,8 @@ stateDiagram-v2
 
 ## Known Issues & Limitations
 
-- **Latency & Tool Thrashing:** The system can experience slow response times because the LLM occasionally makes redundant or excessive tool calls before arriving at a final text response.
-- **Data Leakage during Verification:** The LLM sometimes leaks PII prematurely. For example, if the user only provides a name (e.g., "James Wilson"), the LLM may hallucinate or infer the date of birth without explicitly asking the user to provide it.
+- **Latency & Tool Thrashing:** The system can experience slow response times because the LLM occasionally makes redundant or excessive tool calls (such as transitioning states multiple times unnecessarily) before arriving at a final text response.
+- **Data Leakage during Verification:** The LLM sometimes leaks PII prematurely. For example, if the user only provides a name (e.g., "James Wilson"), the LLM may hallucinate or infer the date of birth from its training data/context without explicitly asking the user to provide it.
 
 ## Key Components
 
