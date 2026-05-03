@@ -2,11 +2,13 @@
 WebSocket handler for the Medi voice assistant.
 
 This module is the transport layer only — it wires together:
-  - Frontend WebSocket ↔ Deepgram STT
-  - Deepgram transcript events → LLM orchestration (Phase 1)
-  - LLM response → ElevenLabs TTS → Frontend audio (Phase 2)
+  - Frontend WebSocket ↔ Deepgram STT (Speech-to-Text)
+  - Deepgram transcript events → LLM orchestration (Phase 1, handles logic/tool calling)
+  - LLM response → ElevenLabs TTS (Text-to-Speech) → Frontend audio (Phase 2)
 
-All business logic lives in orchestrator.py, tools.py, guardrails.py, and prompts.py.
+All business logic (what the agent says, tools it uses, states) lives in 
+orchestrator.py, tools.py, guardrails.py, and prompts.py. This file is purely 
+concerned with moving data streams between the frontend and the AI services.
 """
 
 import asyncio
@@ -24,6 +26,10 @@ from app.core.config import settings
 
 router = APIRouter()
 
+# ── Deepgram Configuration ───────────────────────────────────────────────────
+# We use Deepgram's nova-2 model for fast and accurate streaming transcription.
+# We enable vad_events (Voice Activity Detection) and interim_results so we 
+# get partial words as the user speaks.
 DG_PARAMS = (
     "model=nova-2&encoding=linear16&sample_rate=16000&channels=1"
     "&interim_results=true&utterance_end_ms=1000&vad_events=true"
@@ -34,11 +40,18 @@ DEEPGRAM_URL = f"wss://api.deepgram.com/v1/listen?{DG_PARAMS}"
 # ── TTS Streaming (Phase 2) ──────────────────────────────────────────────────
 
 async def stream_tts(text: str, websocket: WebSocket) -> None:
-    """Stream text through ElevenLabs TTS and send audio chunks to the frontend."""
+    """
+    Stream text through ElevenLabs TTS and send audio chunks to the frontend.
+    
+    This function opens a WebSocket to ElevenLabs, sends the text payload, 
+    and then listens for audio chunks returning. As soon as a chunk arrives, 
+    it is forwarded as binary data directly to the frontend's WebSocket.
+    """
     api_key = getattr(settings, "elevenlabs_api_key", None)
     if not api_key:
         return
 
+    # A predefined voice ID from ElevenLabs.
     voice_id = "pNInz6obpgDQGcFmaJgB"
     url = (
         f"wss://api.elevenlabs.io/v1/text-to-speech/{voice_id}"
@@ -52,7 +65,8 @@ async def stream_tts(text: str, websocket: WebSocket) -> None:
         tts_socket = await websockets.connect(url, ssl=ssl_ctx)
         print("Connected to ElevenLabs TTS!")
 
-        # Init handshake
+        # Initialize the handshake. The chunk_length_schedule controls 
+        # how frequently ElevenLabs sends us audio chunks (lower = faster time to first byte).
         await tts_socket.send(json.dumps({
             "text": " ",
             "voice_settings": {"stability": 0.5, "similarity_boost": 0.8},
@@ -61,6 +75,7 @@ async def stream_tts(text: str, websocket: WebSocket) -> None:
         }))
 
         async def receive_audio():
+            """Background task to continuously read TTS audio from ElevenLabs."""
             try:
                 while True:
                     msg = await tts_socket.recv()
@@ -70,9 +85,11 @@ async def stream_tts(text: str, websocket: WebSocket) -> None:
                         print(f"ElevenLabs API Error: {data['error']}")
                     if data.get("audio"):
                         print(".", end="", flush=True)
+                        # Decode the base64 audio and send as raw binary bytes over WebSocket
                         audio_bytes = base64.b64decode(data["audio"])
                         await websocket.send_bytes(audio_bytes)
                     if data.get("isFinal"):
+                        # ElevenLabs signals when generation for this request is fully complete
                         print("\nElevenLabs reports isFinal: True")
                         break
             except websockets.exceptions.ConnectionClosed as e:
@@ -87,11 +104,12 @@ async def stream_tts(text: str, websocket: WebSocket) -> None:
 
         tts_task = asyncio.create_task(receive_audio())
 
-        # Send text + flush
+        # Send text + flush. The empty string tells ElevenLabs we are done sending text.
         await tts_socket.send(json.dumps({"text": text, "try_trigger_generation": True}))
         await tts_socket.send(json.dumps({"text": ""}))
 
         try:
+            # Await the completion of the receive task (or timeout if it gets stuck)
             await asyncio.wait_for(tts_task, timeout=10.0)
         except asyncio.TimeoutError:
             pass
@@ -105,9 +123,14 @@ async def stream_tts(text: str, websocket: WebSocket) -> None:
 
 @router.websocket("/audio")
 async def websocket_audio_endpoint(websocket: WebSocket):
+    """
+    Main entry point for a frontend connection. Each client session 
+    creates one instance of this endpoint execution.
+    """
     await websocket.accept()
     print("WebSocket client connected to /api/v1/ws/audio")
 
+    # Validate that our third-party keys are present.
     if not settings.deepgram_api_key:
         print("ERROR: deepgram_api_key not found in settings!")
         await websocket.close()
@@ -121,16 +144,21 @@ async def websocket_audio_endpoint(websocket: WebSocket):
     extra_headers = {"Authorization": f"Token {settings.deepgram_api_key}"}
 
     # ── Session state ─────────────────────────────────────────────────────
+    # The session state tracks the state machine stage, verified patient info,
+    # and the message history containing the LLM prompts and conversation log.
     current_state = "GREETING"
     verified_patient_id = None
     messages = [{"role": "system", "content": get_system_prompt(current_state, verified_patient_id)}]
     accumulated_transcript = ""
     current_llm_task = None
+    
     # Event the receiver sets to signal the orchestrator to abort early
+    # if the user interrupts mid-generation.
     cancel_event = asyncio.Event()
 
     try:
         ssl_context = ssl.create_default_context(cafile=certifi.where())
+        # Open connection to Deepgram STT.
         async with websockets.connect(
             DEEPGRAM_URL, additional_headers=extra_headers, ssl=ssl_context
         ) as dg_socket:
@@ -138,11 +166,17 @@ async def websocket_audio_endpoint(websocket: WebSocket):
 
             # ── Receiver: frontend audio/commands → Deepgram ──────────
             async def receiver():
+                """
+                Listens to the frontend.
+                If binary bytes are received (audio), forwards them to Deepgram.
+                If text is received (JSON), parses it for commands like 'interrupt'.
+                """
                 nonlocal current_llm_task
                 try:
                     while True:
                         data = await websocket.receive()
                         if "bytes" in data:
+                            # Forward raw audio bytes to Deepgram for STT
                             await dg_socket.send(data["bytes"])
                         elif "text" in data:
                             try:
@@ -166,6 +200,11 @@ async def websocket_audio_endpoint(websocket: WebSocket):
 
             # ── Sender: Deepgram transcripts → LLM → TTS → frontend ──
             async def sender():
+                """
+                Listens to Deepgram.
+                When words are recognized, it emits 'transcript' messages back to the frontend.
+                When the user stops speaking ('UtteranceEnd'), it triggers the LLM Orchestrator.
+                """
                 nonlocal accumulated_transcript, current_state, verified_patient_id, current_llm_task
 
                 try:
@@ -177,12 +216,18 @@ async def websocket_audio_endpoint(websocket: WebSocket):
                         if msg_type == "UtteranceEnd":
                             print("\n>>> [UtteranceEnd] User stopped speaking.")
                             text_to_process = accumulated_transcript.strip()
+                            
+                            # Only trigger LLM if the user actually said something
                             if text_to_process:
                                 accumulated_transcript = ""
                                 print(f"--- Triggering Brain (Groq) with: '{text_to_process}' ---")
                                 messages.append({"role": "user", "content": text_to_process})
 
                                 async def process_llm():
+                                    """
+                                    Inner task that runs the LLM logic. It can be cancelled
+                                    by the receiver if the user interrupts.
+                                    """
                                     nonlocal current_state, verified_patient_id
                                     response_sent = False
                                     full_response = ""
@@ -197,9 +242,11 @@ async def websocket_audio_endpoint(websocket: WebSocket):
 
                                     # ── Filler callback: fire-and-forget TTS ──────
                                     async def send_filler(phrase: str) -> None:
-                                        """Kick off filler TTS in the background and
+                                        """
+                                        Kick off filler TTS in the background and
                                         return immediately so tool execution runs in
-                                        parallel with the filler audio playback."""
+                                        parallel with the filler audio playback.
+                                        """
                                         nonlocal filler_tts_task
                                         try:
                                             # Send text to frontend chat panel right away
@@ -216,6 +263,7 @@ async def websocket_audio_endpoint(websocket: WebSocket):
                                             print(f"[Filler TTS Error]: {e}")
 
                                     try:
+                                        # Run the state machine and orchestrator logic
                                         full_response, current_state, verified_patient_id = (
                                             await run_orchestration(
                                                 messages, current_state,
@@ -240,14 +288,14 @@ async def websocket_audio_endpoint(websocket: WebSocket):
                                             except asyncio.TimeoutError:
                                                 print("[Filler TTS timed out, proceeding]")
 
-                                        # Send text to frontend first
+                                        # Send text to frontend first so it appears in chat UI
                                         await websocket.send_text(json.dumps({
                                             "type": "bot_response",
                                             "text": full_response,
                                         }))
                                         response_sent = True
 
-                                        # Phase 2: TTS
+                                        # Phase 2: Run Text-to-Speech to generate bot audio
                                         await stream_tts(full_response, websocket)
 
                                     except asyncio.CancelledError:
@@ -255,6 +303,8 @@ async def websocket_audio_endpoint(websocket: WebSocket):
                                         # Cancel any in-flight filler TTS too
                                         if filler_tts_task and not filler_tts_task.done():
                                             filler_tts_task.cancel()
+                                        
+                                        # Ensure we save any partial text generation to the history
                                         if not response_sent and full_response.strip():
                                             messages.append({"role": "assistant", "content": full_response})
                                             asyncio.create_task(websocket.send_text(json.dumps({
@@ -265,6 +315,7 @@ async def websocket_audio_endpoint(websocket: WebSocket):
                                     except Exception as e:
                                         print(f"[LLM Error]: {e}")
                                         error_str = str(e).lower()
+                                        # Provide a graceful fallback on rate limits or failures
                                         if "429" in error_str or "rate limit" in error_str:
                                             err_msg = "I'm currently receiving too many requests. Please try again in a moment."
                                         else:
@@ -277,11 +328,13 @@ async def websocket_audio_endpoint(websocket: WebSocket):
                                         except Exception:
                                             pass
 
+                                # Cancel old LLM tasks if a new utterance finishes before the old one is done
                                 if current_llm_task and not current_llm_task.done():
                                     current_llm_task.cancel()
                                 current_llm_task = asyncio.create_task(process_llm())
                             continue
 
+                        # Deepgram sends partial/interim word transcripts as the user speaks
                         if msg_type == "Results":
                             transcript = (
                                 res.get("channel", {})
@@ -308,6 +361,8 @@ async def websocket_audio_endpoint(websocket: WebSocket):
                     print(f"Sender error: {e}")
 
             # ── Keep-alive ping for Deepgram ──────────────────────────
+            # Required so Deepgram doesn't close the connection when the user
+            # is silent for a long period of time.
             async def keep_alive():
                 try:
                     while True:
@@ -316,6 +371,7 @@ async def websocket_audio_endpoint(websocket: WebSocket):
                 except BaseException:
                     pass
 
+            # Run receiver, sender, and keep_alive concurrently
             await asyncio.gather(receiver(), sender(), keep_alive())
 
     except WebSocketDisconnect:

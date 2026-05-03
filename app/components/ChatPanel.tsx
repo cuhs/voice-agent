@@ -1,8 +1,9 @@
 /**
  * Chat panel component.
  *
- * Renders the scrollable message list (user bubbles, bot bubbles,
- * interim transcript) and the empty-state welcome message.
+ * Renders the scrollable message list. It displays user bubbles, bot bubbles,
+ * and the interim (typing) transcript from Deepgram.
+ * It also handles automatically scrolling to the bottom when new messages arrive.
  */
 
 "use client";
@@ -21,14 +22,17 @@ interface ChatPanelProps {
 }
 
 export default function ChatPanel({ chatHistory, interimTranscript }: ChatPanelProps) {
+  // Reference to an empty div at the bottom of the list for auto-scrolling
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
+  // Auto-scroll to bottom whenever history or interim transcript updates
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [chatHistory, interimTranscript]);
 
   return (
     <div style={styles.chatContainer}>
+      {/* Empty state: Displayed before the user says anything */}
       {chatHistory.length === 0 && !interimTranscript && (
         <div style={styles.emptyState}>
           <h2>Welcome to Greenfield Medical Group</h2>
@@ -36,6 +40,7 @@ export default function ChatPanel({ chatHistory, interimTranscript }: ChatPanelP
         </div>
       )}
 
+      {/* Render finalized messages */}
       {chatHistory.map((msg, idx) => (
         <div
           key={idx}
@@ -50,6 +55,7 @@ export default function ChatPanel({ chatHistory, interimTranscript }: ChatPanelP
         </div>
       ))}
 
+      {/* Render the interim transcript as a typing bubble */}
       {interimTranscript && (
         <div style={{ ...styles.messageWrapper, justifyContent: "flex-end" }}>
           <div style={{ ...styles.userMessage, ...styles.interimMessage }}>
@@ -57,6 +63,8 @@ export default function ChatPanel({ chatHistory, interimTranscript }: ChatPanelP
           </div>
         </div>
       )}
+      
+      {/* Invisible anchor for scrolling */}
       <div ref={messagesEndRef} />
     </div>
   );

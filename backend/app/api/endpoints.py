@@ -1,8 +1,18 @@
+"""
+FastAPI Endpoints & Mock Database.
+
+This file provides the mock database dictionaries representing the clinic's EHR 
+(Electronic Health Record) system, and the FastAPI routes that expose them.
+It also includes the fuzzy-matching logic used to verify patient identity.
+"""
+
 from difflib import SequenceMatcher
 from fastapi import APIRouter, HTTPException
 
 router = APIRouter()
 mock_router = APIRouter()
+
+# ── Mock Database ──────────────────────────────────────────────────────────
 
 MOCK_PATIENTS = {
     "1001": {"id": "1001", "name": "Elena Smith", "dob": "1980-05-15", "primary_provider": "Dr. Sarah Jenkins", "insurance": "BlueCross", "allergies": ["Penicillin"], "active_conditions": ["Hypertension", "Asthma"]},
@@ -49,6 +59,8 @@ MOCK_AVAILABLE_SLOTS = [
     {"date": "2026-04-21", "time": "02:00 PM", "provider": "Dr. Michael Torres", "department": "Endocrinology"}
 ]
 
+# ── API Routes ───────────────────────────────────────────────────────────────
+
 @router.get("/status")
 async def get_status():
     return {"status": "ok", "message": "API is running"}
@@ -75,15 +87,29 @@ async def get_labs(patient_id: str):
 async def get_available_slots():
     return MOCK_AVAILABLE_SLOTS
 
+# ── Internal Functions ───────────────────────────────────────────────────────
+
 def internal_lookup_patient(name: str, dob: str):
+    """
+    Fuzzy-match a patient's name and verify against DOB.
+    
+    Since users are speaking their names, Speech-to-Text may slightly misspell 
+    them (e.g. "Sofia" vs "Sophia"). We use SequenceMatcher to compute a 
+    similarity ratio, allowing us to successfully identify the patient 
+    despite minor transcription errors, provided the exact DOB matches.
+    """
     best_match = None
     best_ratio = 0.0
     for pid, p in MOCK_PATIENTS.items():
+        # Exact match on DOB is required for security
         if p["dob"] != dob:
             continue
+        
+        # Fuzzy match on name to account for STT spelling errors
         ratio = SequenceMatcher(None, p["name"].lower(), name.lower()).ratio()
         if ratio > best_ratio:
             best_ratio = ratio
             best_match = p
+            
     # 0.75 threshold: catches Sophia→Sofia, Aisha→Aysha but rejects unrelated names
     return best_match if best_ratio >= 0.75 else None

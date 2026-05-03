@@ -3,15 +3,22 @@ System prompt builder and LLM tool definitions for the Medi voice assistant.
 
 This module is the single source of truth for:
   - The base system prompt (identity, scope, voice rules, safety rules)
-  - State-specific goal instructions
-  - The TOOLS JSON schema array sent to Groq
+  - State-specific goal instructions (what the LLM should try to achieve right now)
+  - The TOOLS JSON schema array sent to Groq for function calling.
 """
 
 
 def get_system_prompt(current_state: str, verified_patient_id: str | None) -> str:
-    """Build the system prompt dynamically based on conversation state."""
+    """
+    Build the system prompt dynamically based on the current conversation state.
+    
+    This function pieces together various "rules" blocks and appends a
+    dynamic goal based on the `current_state` (e.g. GREETING vs. SCHEDULING).
+    This ensures the LLM behaves appropriately for its current context.
+    """
 
     # ── Identity & Scope ──────────────────────────────────────────────────
+    # Tells the LLM who it is and rigidly bounds what it is allowed to do.
     identity = (
         "You are Medi, a patient coordination assistant for Greenfield Medical Group. "
         "You handle appointments, prescriptions, lab results, and general practice questions. "
@@ -20,6 +27,7 @@ def get_system_prompt(current_state: str, verified_patient_id: str | None) -> st
     )
 
     # ── Tool Usage Rules ──────────────────────────────────────────────────
+    # Prevents hallucinations and enforces strict usage of the verified patient ID.
     tool_rules = (
         "TOOL RULES: "
         "1. Always verify patient identity with lookup_patient before accessing any records. "
@@ -29,6 +37,8 @@ def get_system_prompt(current_state: str, verified_patient_id: str | None) -> st
     )
 
     # ── Voice-Specific Rules ──────────────────────────────────────────────
+    # Crucial for a voice agent. Because output is sent to TTS, we must prevent
+    # the LLM from outputting Markdown, long lists, or formatting that sounds bad when spoken.
     voice_rules = (
         "VOICE RULES: "
         "1. Keep responses to 1-3 short sentences. This is a phone call, not a text chat. "
@@ -43,6 +53,7 @@ def get_system_prompt(current_state: str, verified_patient_id: str | None) -> st
     )
 
     # ── Safety Rules ──────────────────────────────────────────────────────
+    # General safety fallback in the system prompt (complements the guardrails classifier).
     safety_rules = (
         "SAFETY RULES: "
         "1. If a patient describes emergency symptoms (chest pain, difficulty breathing, "
@@ -55,6 +66,7 @@ def get_system_prompt(current_state: str, verified_patient_id: str | None) -> st
     )
 
     # ── State context ─────────────────────────────────────────────────────
+    # Feed the actual state values to the prompt so the LLM is aware of its context.
     state_context = f"\nCURRENT CONVERSATION STATE: {current_state}\n"
     if verified_patient_id:
         state_context += (
@@ -63,6 +75,9 @@ def get_system_prompt(current_state: str, verified_patient_id: str | None) -> st
         )
 
     # ── State-specific goals ──────────────────────────────────────────────
+    # These goals explicitly map to the state machine architecture. They guide
+    # the LLM towards making the correct `transition_state` tool calls or
+    # knowing what information it needs to collect next.
     state_goals = {
         "GREETING": (
             "GOAL: Greet the patient warmly and ask how you can help today. "
@@ -115,6 +130,7 @@ def get_system_prompt(current_state: str, verified_patient_id: str | None) -> st
 
     goal = state_goals.get(current_state, state_goals["CLOSING"])
 
+    # Combine everything into the final prompt text
     return (
         f"{identity}\n\n"
         f"{tool_rules}\n\n"
@@ -126,6 +142,8 @@ def get_system_prompt(current_state: str, verified_patient_id: str | None) -> st
 
 
 # ── Tool definitions sent to Groq's function-calling API ──────────────────────
+# These are standard JSON schemas defining what tools are available, what they do,
+# and what parameters they require.
 
 _TOOL_TRANSITION = {"type": "function", "function": {
     "name": "transition_state",
@@ -195,7 +213,11 @@ TOOLS = [_TOOL_TRANSITION, _TOOL_LOOKUP, _TOOL_APPOINTMENTS,
 # Data tools that can serve patient requests
 _DATA_TOOLS = [_TOOL_APPOINTMENTS, _TOOL_PRESCRIPTIONS, _TOOL_LABS, _TOOL_SLOTS]
 
-# Per-state tool availability — keeps the LLM focused on what's relevant
+# ── Per-state tool availability ───────────────────────────────────────────────
+# We restrict the tools the LLM can call based on the state. For example, during 
+# GREETING, it shouldn't try to lookup a patient or get appointments. This 
+# significantly reduces hallucinated tool calls and keeps the LLM focused on the current goal.
+
 _STATE_TOOLS: dict[str, list[dict]] = {
     "GREETING":      [_TOOL_TRANSITION],
     "VERIFICATION":  [_TOOL_TRANSITION, _TOOL_LOOKUP],

@@ -3,8 +3,8 @@ Tool execution dispatcher for the Medi voice assistant.
 
 Handles executing tool calls returned by the LLM, including:
   - State guards (blocking data tools before patient verification)
-  - State transitions
-  - Patient lookup (delegates to endpoints.internal_lookup_patient)
+  - State transitions (updating the conversation phase)
+  - Patient lookup (delegates to endpoints.internal_lookup_patient for fuzzy matching)
   - Data retrieval (appointments, prescriptions, labs, available slots)
 """
 
@@ -19,6 +19,7 @@ from app.api.endpoints import (
 )
 
 # Tools that require a verified patient before they can be called
+# This is our internal authorization layer.
 DATA_TOOLS = ("get_appointments", "get_prescriptions", "get_labs")
 
 
@@ -26,13 +27,19 @@ def execute_tool(tool_name: str, args: dict, verified_patient_id: str | None) ->
     """
     Execute a single tool call and return (result_string, state_updates).
 
-    state_updates is a dict that may contain:
-      - "current_state": new state string (from transition_state)
-      - "verified_patient_id": patient ID string (from lookup_patient)
+    The `result_string` is the raw JSON or text output that gets added back into the 
+    conversation history for the LLM to read.
+    
+    `state_updates` is a dict that may contain:
+      - "current_state": new state string (from transition_state or auto-transitions)
+      - "verified_patient_id": patient ID string (from a successful lookup_patient)
+      - "template_response": a hardcoded string that skips the LLM and goes straight to TTS.
     """
     state_updates: dict = {}
 
     # ── State Guards ──────────────────────────────────────────────────────
+    # Security layer: If the LLM somehow hallucinates a data tool call without 
+    # first verifying the patient, we block it here.
     if tool_name in DATA_TOOLS and not verified_patient_id:
         result = "ACCESS DENIED: Patient identity not yet verified. You must call lookup_patient first."
         print(f"[STATE GUARD]: Blocked {tool_name} — patient not verified")
@@ -40,11 +47,14 @@ def execute_tool(tool_name: str, args: dict, verified_patient_id: str | None) ->
 
     # ── Dispatch ──────────────────────────────────────────────────────────
     if tool_name == "transition_state":
+        # Simply updates the conversation phase. The orchestrator will use this 
+        # new state to fetch the next system prompt.
         new_state = args.get("new_state", "GREETING")
         state_updates["current_state"] = new_state
         result = f"State transitioned to {new_state}."
 
     elif tool_name == "lookup_patient":
+        # Verifies identity against our mock DB.
         if not args.get("dob"):
             result = "DOB not provided. Ask the patient for their date of birth."
         else:
@@ -60,6 +70,7 @@ def execute_tool(tool_name: str, args: dict, verified_patient_id: str | None) ->
                 result = "Patient Not Found."
 
     elif tool_name == "get_appointments":
+        # Fetch mock appointments and inject a deterministic response
         data = MOCK_APPOINTMENTS.get(args.get("patient_id"), [])
         result = json.dumps(data)
         state_updates["current_state"] = "SERVICING"
@@ -67,6 +78,9 @@ def execute_tool(tool_name: str, args: dict, verified_patient_id: str | None) ->
             state_updates["template_response"] = "You don't have any upcoming appointments. Would you like to schedule one?"
         else:
             next_apt = data[0]
+            # By passing `template_response`, the orchestrator immediately returns this string 
+            # to the user, skipping the final LLM generation step. This avoids hallucinations 
+            # on sensitive info like dates and times.
             state_updates["template_response"] = (
                 f"I can see you have {len(data)} upcoming appointment(s). The next one is on "
                 f"{next_apt['date']} at {next_apt['time']} with {next_apt['provider']} in "
