@@ -9,45 +9,34 @@ The system leverages a WebSocket-based streaming architecture to minimize audio 
 
 ```mermaid
 sequenceDiagram
-    participant User
-    participant Frontend (React + WebAudio)
-    participant Backend (FastAPI WebSocket)
-    participant STT (Deepgram)
-    participant LLM (Groq)
-    participant DB as Mock EHR / Tools
-    participant TTS (ElevenLabs)
+    actor User
+    participant App as Frontend
+    participant API as Backend
+    participant Deepgram as STT
+    participant Groq as LLM
+    participant TTS as ElevenLabs
 
-    User->>Frontend: Speaks into microphone
-    Frontend->>Backend: Streams PCM16 Audio Chunks via WebSocket
-    Backend->>STT: Forwards PCM16 Chunks
+    User->>App: Speaks
+    App->>API: Stream PCM Audio
+    API->>Deepgram: Forward Audio
+    Deepgram-->>API: Interim Transcripts
+    API-->>App: Update UI
     
-    rect rgb(240, 248, 255)
-        Note right of Frontend: Real-time Transcription Phase
-        STT-->>Backend: Partial Transcript JSON
-        Backend-->>Frontend: Partial Transcript JSON (UI updates)
-    end
+    Deepgram->>API: UtteranceEnd (Final Transcript)
     
-    STT->>Backend: "UtteranceEnd" Event + Final Transcript
+    Note over API,Groq: Phase 1: Tool Orchestration
+    API->>Groq: Prompt + Tools + Transcript
+    Groq-->>API: Tool Request (e.g., lookup_patient)
+    API->>API: Execute Local Tool
+    API->>Groq: Return Tool Data
+    Groq->>API: Final Text Response
     
-    rect rgb(255, 245, 238)
-        Note right of LLM: Phase 1: LLM Orchestration & Tool Execution
-        Backend->>LLM: System Prompt + History + Tools + Transcript
-        LLM-->>Backend: Tool Call Request (e.g., lookup_patient)
-        Backend->>DB: Execute Function
-        DB-->>Backend: Return Tool Output
-        Backend->>LLM: Append Tool Output & Re-prompt
-    end
-    
-    rect rgb(240, 255, 240)
-        Note right of TTS: Phase 2: Response Generation & TTS
-        LLM->>Backend: Final Text Response
-        Backend->>Frontend: Text Response (UI chat update)
-        Backend->>TTS: Streams Text to TTS API
-        TTS-->>Backend: Streams PCM16 Audio Chunks
-        Backend-->>Frontend: Forwards PCM16 Audio Chunks
-    end
-    
-    Frontend->>User: Plays Audio seamlessly
+    Note over API,TTS: Phase 2: Audio Generation
+    API->>App: Update UI (Text)
+    API->>TTS: Stream Final Text
+    TTS-->>API: Stream Audio Chunks
+    API-->>App: Forward Audio Chunks
+    App->>User: Play Audio
 ```
 
 ## State Machine
