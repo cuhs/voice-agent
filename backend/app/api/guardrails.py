@@ -17,13 +17,25 @@ from app.api.endpoints import MOCK_PRESCRIPTIONS, MOCK_LABS
 EMERGENCY_KEYWORDS = [
     "suicide", "chest pain", "heart attack", "can't breathe",
     "emergency", "911", "bleeding out", "stroke", "overdose",
-    "killing myself", "want to die",
+    "killing myself", "want to die", "shortness of breath",
+    "severe pain", "unconscious", "passed out", "fainted",
+    "choking", "poison", "allergic reaction", "anaphylaxis",
+    "stabbing pain", "shooting pain", "gunshot", "self harm",
+    "cut myself", "swallowed pills", "seizure", "convulsion",
+    "numbness", "face drooping", "slurred speech", "vomiting blood",
+    "coughing blood", "heavy bleeding"
 ]
 
 CLINICAL_KEYWORDS = [
     "dosage", "should i take", "side effects", "diagnosis",
     "does this mean i have", "am i sick", "what is this pill",
-    "is this cancer", "prescribe me",
+    "is this cancer", "prescribe me", "symptoms", "treatment",
+    "how to treat", "cure", "remedy", "what is wrong with me",
+    "why does my", "does it mean", "interaction", "can i mix",
+    "safe to take", "allergic to", "prognosis", "is it contagious",
+    "second opinion", "interpret my", "what do these results mean",
+    "normal range", "high blood pressure", "low blood sugar",
+    "fever", "infection", "what disease", "is it fatal"
 ]
 
 EMERGENCY_RESPONSE = (
