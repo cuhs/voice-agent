@@ -125,6 +125,9 @@ async def run_orchestration(
     user_text: str,
     filler_callback: FillerCallback | None = None,
     cancel_event: "asyncio.Event | None" = None,
+    dev_log_callback: Callable[[str], Coroutine[Any, Any, None]] | None = None,
+    state_update_callback: Callable[[str], Coroutine[Any, Any, None]] | None = None,
+    pipeline_callback: Callable[[str, str], Coroutine[Any, Any, None]] | None = None,
 ) -> tuple[str, str, str | None]:
     """
     Run the full Phase 1 orchestration loop.
@@ -156,10 +159,32 @@ async def run_orchestration(
         """Helper to check if the user has interrupted the bot."""
         return cancel_event is not None and cancel_event.is_set()
 
+    async def log_dev(msg: str):
+        if dev_log_callback:
+            try:
+                await dev_log_callback(msg)
+            except Exception:
+                pass
+
+    async def update_state(state: str):
+        if state_update_callback:
+            try:
+                await state_update_callback(state)
+            except Exception:
+                pass
+
+    async def emit_pipeline(stage: str, detail: str = ""):
+        if pipeline_callback:
+            try:
+                await pipeline_callback(stage, detail)
+            except Exception:
+                pass
+
     # ── Pre-LLM safety check ─────────────────────────────────────────────
     # Run the user input through a fast, deterministic regex classifier before 
     # hitting the LLM. This catches emergencies immediately.
     safety_response, safety_injection = classify_safety(user_text)
+    await emit_pipeline("safety", "Pre-LLM safety check")
     if safety_response:
         messages.append({"role": "assistant", "content": safety_response})
         return safety_response, current_state, verified_patient_id
@@ -184,6 +209,8 @@ async def run_orchestration(
             return "", current_state, verified_patient_id
 
         print(f"\n[Phase 1] Calling LLM (state={current_state}, with tools)...")
+        await log_dev(f"[Phase 1] Calling LLM (state={current_state})...")
+        await emit_pipeline("llm", f"Calling Groq LLM (state={current_state})")
 
         # Dynamic temperature: warmer (more creative) for chat states like GREETING, 
         # colder (more deterministic) for data-heavy states to prevent hallucinations.
@@ -299,6 +326,8 @@ async def run_orchestration(
                     args = {}
 
                 print(f"[TOOL EXECUTED]: {tool_name}({args})")
+                await log_dev(f"[TOOL] Executing {tool_name}({args})")
+                await emit_pipeline("tools", f"Executing {tool_name}")
                 
                 # Execute the actual logic in tools.py
                 result, state_updates = execute_tool(tool_name, args, verified_patient_id)
@@ -306,6 +335,7 @@ async def run_orchestration(
                 # Apply state updates returned by the tool
                 if "current_state" in state_updates:
                     current_state = state_updates["current_state"]
+                    await update_state(current_state)
                     # Update system prompt whenever state changes
                     messages[0]["content"] = get_system_prompt(current_state, verified_patient_id)
                     if safety_injection:
@@ -318,6 +348,7 @@ async def run_orchestration(
                         messages[0]["content"] += "\n\n" + safety_injection
 
                 last_tool_results[tool_name] = result
+                await log_dev(f"[TOOL] {tool_name} returned {len(str(result))} characters of data.")
                 # Append the tool's result to the message history so the LLM can read it
                 messages.append({
                     "role": "tool",
@@ -354,6 +385,7 @@ async def run_orchestration(
     # Run the final text response through our hallucination checker. 
     # If it mentions a medication or test not present in the tool results, 
     # replace the response with a safe fallback.
+    await emit_pipeline("guardrails", "Post-LLM hallucination validation")
     hallucination_replacement = validate_response(full_response, last_tool_results)
     if hallucination_replacement:
         full_response = hallucination_replacement

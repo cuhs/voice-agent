@@ -94,6 +94,9 @@ stateDiagram-v2
 
 - **Latency & Tool Thrashing:** The system can experience slow response times because the LLM occasionally makes redundant or excessive tool calls (such as transitioning states multiple times unnecessarily) before arriving at a final text response.
 - **Data Leakage during Verification:** The LLM sometimes leaks PII prematurely. For example, if the user only provides a name (e.g., "James Wilson"), the LLM may hallucinate or infer the date of birth from its training data/context without explicitly asking the user to provide it.
+- **LLM context window:** The LLM sometimes asks for information and then forgets earlier information, like asking for first name more than once.
+- **Not saying anything:** Sometimes the bot doesn't say anything, usually specifically after authenticated without a specific task.
+- **LLM Hallucinating Birthdays:** Sometimes I say a name and the bot hallucinates a birthdate.
 
 ## Key Components
 

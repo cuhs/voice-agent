@@ -221,6 +221,8 @@ async def websocket_audio_endpoint(websocket: WebSocket):
                             if text_to_process:
                                 accumulated_transcript = ""
                                 print(f"--- Triggering Brain (Groq) with: '{text_to_process}' ---")
+                                await websocket.send_text(json.dumps({"type": "pipeline_stage", "stage": "stt", "detail": f"Transcribed: '{text_to_process}'"}))
+                                await websocket.send_text(json.dumps({"type": "dev_log", "content": f"[STT] UtteranceEnd received. Transcribed: '{text_to_process}'"}))
                                 messages.append({"role": "user", "content": text_to_process})
 
                                 async def process_llm():
@@ -262,7 +264,17 @@ async def websocket_audio_endpoint(websocket: WebSocket):
                                         except Exception as e:
                                             print(f"[Filler TTS Error]: {e}")
 
+                                    async def send_dev_log(content: str):
+                                        await websocket.send_text(json.dumps({"type": "dev_log", "content": content}))
+                                        
+                                    async def send_state_update(state: str):
+                                        await websocket.send_text(json.dumps({"type": "state_update", "state": state}))
+
+                                    async def send_pipeline_stage(stage: str, detail: str = ""):
+                                        await websocket.send_text(json.dumps({"type": "pipeline_stage", "stage": stage, "detail": detail}))
+
                                     try:
+                                        await send_pipeline_stage("orchestration", "Running LLM orchestration loop")
                                         # Run the state machine and orchestrator logic
                                         full_response, current_state, verified_patient_id = (
                                             await run_orchestration(
@@ -270,6 +282,9 @@ async def websocket_audio_endpoint(websocket: WebSocket):
                                                 verified_patient_id, text_to_process,
                                                 filler_callback=send_filler,
                                                 cancel_event=cancel_event,
+                                                dev_log_callback=send_dev_log,
+                                                state_update_callback=send_state_update,
+                                                pipeline_callback=send_pipeline_stage,
                                             )
                                         )
 
@@ -296,7 +311,10 @@ async def websocket_audio_endpoint(websocket: WebSocket):
                                         response_sent = True
 
                                         # Phase 2: Run Text-to-Speech to generate bot audio
+                                        await send_pipeline_stage("tts", f"Streaming TTS: '{full_response[:40]}...'")
+                                        await send_dev_log(f"[TTS] Generating audio via ElevenLabs for text: '{full_response[:50]}...'")
                                         await stream_tts(full_response, websocket)
+                                        await send_pipeline_stage("playback", "Audio sent to frontend for playback")
 
                                     except asyncio.CancelledError:
                                         print("\n[LLM Task Cancelled by User Interrupt]")
@@ -347,6 +365,7 @@ async def websocket_audio_endpoint(websocket: WebSocket):
                             is_final = res.get("is_final", False)
                             if is_final:
                                 print(f">>> [FINAL]: {transcript}")
+                                await websocket.send_text(json.dumps({"type": "pipeline_stage", "stage": "capture", "detail": f"Streaming audio to Deepgram..."}))
                                 accumulated_transcript += transcript + " "
                                 await websocket.send_text(json.dumps({
                                     "type": "transcript", "is_final": True, "text": transcript,

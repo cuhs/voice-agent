@@ -22,6 +22,9 @@ export function useVoiceSession() {
   const [isBotSpeaking, setIsBotSpeaking] = useState(false);
   const [chatHistory, setChatHistory] = useState<Message[]>([]);
   const [interimTranscript, setInterimTranscript] = useState("");
+  const [devLogs, setDevLogs] = useState<string[]>([]);
+  const [backendState, setBackendState] = useState<string>("GREETING");
+  const [pipelineStage, setPipelineStage] = useState<{stage: string; detail: string}>({stage: "", detail: ""});
 
   // ── Mutable Refs (don't trigger re-renders) ────────────────────────────
   const streamRef = useRef<MediaStream | null>(null);
@@ -88,6 +91,12 @@ export function useVoiceSession() {
             // so we can hear its audio.
             ignoreAudioRef.current = false;
             setChatHistory((prev) => [...prev, { role: "bot", text: msg.text }]);
+          } else if (msg.type === "dev_log") {
+            setDevLogs((prev) => [...prev, msg.content]);
+          } else if (msg.type === "state_update") {
+            setBackendState(msg.state);
+          } else if (msg.type === "pipeline_stage") {
+            setPipelineStage({stage: msg.stage, detail: msg.detail || ""});
           }
           // interrupt_ack — no action needed on frontend, just an acknowledgement
         } catch (e) {
@@ -126,6 +135,9 @@ export function useVoiceSession() {
       setStatus("connecting");
       setChatHistory([]);
       setInterimTranscript("");
+      setDevLogs([]);
+      setBackendState("GREETING");
+      setPipelineStage({stage: "", detail: ""});
       
       // 1. Open the WebSocket to the backend
       connectWebSocket();
@@ -138,13 +150,13 @@ export function useVoiceSession() {
       const { MicVAD } = await import("@ricky0123/vad-web");
       const ort = await import("onnxruntime-web");
 
-      ort.env.wasm.wasmPaths = "https://cdn.jsdelivr.net/npm/onnxruntime-web/dist/";
+      ort.env.wasm.wasmPaths = "/";
       ort.env.wasm.numThreads = 1; // Limit threads to avoid heavy CPU usage
 
       const myvad = await MicVAD.new({
         getStream: async () => stream,
-        baseAssetPath: "https://cdn.jsdelivr.net/npm/@ricky0123/vad-web/dist/",
-        onnxWASMBasePath: "https://cdn.jsdelivr.net/npm/onnxruntime-web/dist/",
+        baseAssetPath: "/",
+        onnxWASMBasePath: "/",
         positiveSpeechThreshold: 0.6, // Sensitivity
         redemptionMs: 600, // How long to wait after silence to call it 'speech end'
         minSpeechMs: 100,
@@ -273,6 +285,9 @@ export function useVoiceSession() {
     isBotSpeaking,
     chatHistory,
     interimTranscript,
+    devLogs,
+    backendState,
+    pipelineStage,
     micAnalyser: micAnalyserRef.current,
     botAnalyser: playbackManagerRef.current?.botAnalyser ?? null,
     startRecording,

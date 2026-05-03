@@ -8,9 +8,11 @@
 
 "use client";
 
+import { useState } from "react";
 import { useVoiceSession } from "@/app/hooks/useVoiceSession";
 import ChatPanel from "@/app/components/ChatPanel";
 import Waveform from "@/app/components/Waveform";
+import DeveloperPanel from "@/app/components/DeveloperPanel";
 import { styles } from "@/app/styles/voiceAgent";
 
 export default function Home() {
@@ -21,11 +23,16 @@ export default function Home() {
     isBotSpeaking,
     chatHistory,
     interimTranscript,
+    devLogs,
+    backendState,
+    pipelineStage,
     micAnalyser,
     botAnalyser,
     startRecording,
     stopRecording,
   } = useVoiceSession();
+
+  const [isDevMode, setIsDevMode] = useState(false);
 
   // Toggle button handler
   const handleToggle = () => {
@@ -60,6 +67,10 @@ export default function Home() {
             <div style={{ ...styles.dot, backgroundColor: dotColor }}></div>
             <span style={styles.statusText}>{status.toUpperCase()}</span>
           </div>
+          <label style={{ display: "flex", alignItems: "center", gap: "6px", fontSize: "12px", color: "#64748b", cursor: "pointer", marginRight: "12px" }}>
+            <input type="checkbox" checked={isDevMode} onChange={(e) => setIsDevMode(e.target.checked)} />
+            Dev Mode
+          </label>
           {/* Main Action Button */}
           <button
             onClick={handleToggle}
@@ -70,20 +81,26 @@ export default function Home() {
         </div>
       </header>
 
-      {/* Main chat UI area */}
-      <main style={styles.main}>
-        <ChatPanel chatHistory={chatHistory} interimTranscript={interimTranscript} />
+      {/* Main chat UI area and Developer Panel */}
+      <div style={{ display: "flex", flex: 1, overflow: "hidden" }}>
+        <main style={{ ...styles.main, flex: isDevMode ? 1 : 1, maxWidth: isDevMode ? "50%" : "100%" }}>
+          <ChatPanel chatHistory={chatHistory} interimTranscript={interimTranscript} />
 
-        {/* Only show waveform when the session is active */}
-        {isRecording && (
-          <Waveform
-            micAnalyser={micAnalyser}
-            botAnalyser={botAnalyser}
-            isActive={isRecording}
-            isBotSpeaking={isBotSpeaking}
-          />
+          {/* Only show waveform when the session is active */}
+          {isRecording && (
+            <Waveform
+              micAnalyser={micAnalyser}
+              botAnalyser={botAnalyser}
+              isActive={isRecording}
+              isBotSpeaking={isBotSpeaking}
+            />
+          )}
+        </main>
+        
+        {isDevMode && (
+          <DeveloperPanel backendState={backendState} devLogs={devLogs} pipelineStage={pipelineStage} />
         )}
-      </main>
+      </div>
     </div>
   );
 }
